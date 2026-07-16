@@ -2,8 +2,9 @@
 """okfmem — thin CLI dispatcher for the memory engine.
 
 Usage:
-  okfmem backfill [--dry-run] [--store PATH]     # P1: stamp decay frontmatter
-  okfmem init     [--dry-run] [--status] ...     # P2: pointers + registry
+  okfmem backfill    [--dry-run] [--store PATH]  # P1: stamp decay frontmatter
+  okfmem init        [--dry-run] [--status] ...  # P2: pointers + registry
+  okfmem consolidate [--dry-run] ...             # P3: decay + archive + push
   okfmem status                                  # alias for `init --status`
 
 Subcommands map to the memory_*.py modules living beside this script. Store is
@@ -14,7 +15,8 @@ import runpy
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py"}
+MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
+           "consolidate": "memory_consolidate.py"}
 
 
 def main():

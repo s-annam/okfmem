@@ -19,8 +19,9 @@ then `~/okfmem-store`.
 ## Commands
 
 ```bash
-okfmem backfill [--dry-run]     # P1 — stamp decay frontmatter on every page
-okfmem init     [--dry-run]     # P2 — write harness pointers + build registry
+okfmem backfill    [--dry-run]  # P1 — stamp decay frontmatter on every page
+okfmem init        [--dry-run]  # P2 — write harness pointers + build registry
+okfmem consolidate [--dry-run]  # P3 — decay-score, archive stale, regen, push
 okfmem status                   # what's wired + drift
 ```
 
@@ -68,22 +69,64 @@ One-time (re-runnable to repair), cross-platform:
 
 `--status` / `okfmem status` prints wiring + drift.
 
-## Decay math (consumed by the P3 consolidation job, not yet built)
+### `memory_consolidate.py` (P3) — sleep-time consolidation
+
+Runs at Claude Code session end (Stop hook) or by hand. Per run:
+
+1. **Access tracking** — parse the session transcript (`--transcript PATH`, or
+   `--stdin-hook` to pull `transcript_path` from the Stop-hook JSON on stdin)
+   for reads/greps of any `projects/*/` page, matching both the store path and
+   the `~/.claude/projects/<enc>/memory/…` symlink spelling. Touched pages get
+   `last_accessed = today`, `access_count += 1`. Best-effort: no transcript ⇒
+   pure age decay.
+2. **Decay scoring** — `R = exp(-t_days / S)`, `S = access_count + 1`.
+3. **Graceful archival (never delete)** — move page → `projects/<proj>/archive/`,
+   set `status: archived` + `archived_on`, drop its `MEMORY.md` line, iff
+   `not pinned AND type∉{user,feedback} AND t_days>30 AND R<0.40 AND age>14d`,
+   capped at `--cap` (default 20)/run, lowest-R first.
+4. **Commit + push** the store (skip with `--no-commit` / `--no-push`).
+
+**Cold-start guard (decay epoch).** Backfill seeded `last_accessed = created`
+(git-creation date), so at go-live every never-re-read page would look
+maximally decayed and drain into archive. The archival timer therefore measures
+against `max(last_accessed, epoch)`, where `epoch` is the day tracking went live
+(persisted in `<store>/decay_state.json`, written on first apply run). Every
+page gets a fair 30-day post-go-live window to prove usage.
+
+Guardrails: `--dry-run` writes nothing; never `rm` (archive/ + git = backstop);
+never touches `type: user|feedback` or `pinned: true`; refuses to run in apply
+mode if the store tree is already dirty (unless `--force`/`--no-commit`).
+
+## Decay math
 
 | Quantity | Formula | Default |
 |---|---|---|
 | Importance | deterministic by `type` | user/feedback=10, project=6, reference=3 |
 | Retention | `R = exp(-t_days / S)`, `S = access_count + 1` | archive gate `R < 0.40` |
 | Half-life | `≈ 0.693 · S` days | S=1 → ~0.5 mo; S=4 → ~2.8 mo |
-| Age gate | `t_days_since_accessed > 30` AND `age > 14d` | plain-language rule |
+| Age gate | `t_days > 30` (vs `max(last_accessed, epoch)`) AND `age > 14d` | plain-language rule |
 | Archive cap | ≤ N pages/run | 20 |
 
 ## Status
 
 - **P1 — decay frontmatter + backfill** ✅
 - **P2 — init wrapper (pointers + registry + stale-ref detection)** ✅
-- **P3 — consolidation job** (`memory_consolidate.py`, Stop hook) — not yet built
+- **P3 — consolidation job** (`memory_consolidate.py`) ✅ — dry-run tuned; Stop hook wiring below
 - **P4 — retire manual `/memory-curate`; rewrite continuity blocks** — not yet built
+
+### Wiring the Stop hook (P3 go-live)
+
+Add to `~/.claude/settings.json` `hooks.Stop` (runs after each session ends):
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ {
+  "type": "command",
+  "command": "python3 ~/okfmem/memory_consolidate.py --stdin-hook"
+} ] } ] } }
+```
+
+Dry-run across the whole store first (`okfmem consolidate --dry-run`) — at
+go-live it should report 0 archive candidates (epoch guard).
 
 Design + research: `okfmem-store/design/memory-v2-self-maintaining-design.md`
 and [s-annam/tools#19].
