@@ -54,6 +54,7 @@ POINTER_BLOCK = f"{MARKER_OPEN}\n{POINTER_BODY}\n{MARKER_CLOSE}"
 # Retired-system references the cleanup pass looks for. The ONLY legitimate
 # surviving mention is the retirement-notice sentence in ~/.claude/CLAUDE.md.
 STALE_PATTERNS = [
+    r"\bclaude-memory\b",                       # renamed to okfmem-store
     r"\bmemgraph\b",
     r"\bread_graph\b", r"\bsearch_nodes\b",
     r"\bcreate_entities\b", r"\badd_observations\b",
@@ -63,6 +64,28 @@ STALE_PATTERNS = [
     r"\bck/contexts\b",
 ]
 STALE_RE = re.compile("|".join(STALE_PATTERNS), re.IGNORECASE)
+
+# The old data repo was renamed claude-memory -> okfmem-store. A line that only
+# references that path is a mechanical, unambiguous rewrite (the one thing
+# --apply-cleanup edits automatically).
+CLAUDE_MEMORY_RE = re.compile(r"claude-memory")
+
+# A line that mentions a retired system only to say it is retired is a
+# *notice* (tells agents to ignore leftovers) — same class as the preserved
+# sentence in ~/.claude/CLAUDE.md. Never rewrite these.
+NOTICE_RE = re.compile(r"retire|do not use|no longer|removed|deprecat",
+                       re.IGNORECASE)
+
+
+def classify_line(text):
+    """'path' = safe claude-memory→okfmem-store swap; 'notice' = leave as-is;
+    'review' = flagged but needs a human (never auto-edited)."""
+    if NOTICE_RE.search(text) and not (
+            CLAUDE_MEMORY_RE.search(text) and "okfmem-store" not in text):
+        return "notice"
+    if CLAUDE_MEMORY_RE.search(text):
+        return "path"
+    return "review"
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +222,34 @@ CLEANUP_SKIP_DIRS = {".git", "node_modules", ".venv", "venv",
                      "__pycache__", "dist", "build", ".next"}
 
 
-def scan_stale(reg, self_claude_md):
-    """Report retired-system references across registered project roots.
+def _scan_one(real, findings, seen, fpath):
+    if real in seen:
+        return
+    seen.add(real)
+    try:
+        with open(real, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    hits = [(i + 1, ln.rstrip("\n"), classify_line(ln))
+            for i, ln in enumerate(lines) if STALE_RE.search(ln)]
+    if hits:
+        findings.append((fpath, hits))
 
-    Dedupes by real path (many repos have AGENTS.md -> CLAUDE.md symlinks).
-    The retirement-notice sentence in ~/.claude/CLAUDE.md is the one legitimate
-    mention and is excluded.
+
+def scan_stale(reg, self_claude_md, harness_globals=()):
+    """Report retired-system references across registered project roots plus the
+    harness global files. Each hit is (lineno, text, category) where category is
+    'path' (safe claude-memory->okfmem-store swap), 'notice' (retirement note,
+    left as-is), or 'review' (needs a human).
+
+    Dedupes by real path (many repos have AGENTS.md -> CLAUDE.md symlinks). The
+    retirement-notice sentence in ~/.claude/CLAUDE.md is the one legitimate
+    mention and is excluded entirely.
     """
     seen = set()
+    if self_claude_md:
+        seen.add(os.path.realpath(self_claude_md))  # leave the retirement notice
     findings = []
     roots = sorted(set(reg["map"].keys()))
     for root in roots:
@@ -218,22 +261,37 @@ def scan_stale(reg, self_claude_md):
                 if name not in CLEANUP_FILES:
                     continue
                 fpath = os.path.join(dirpath, name)
-                real = os.path.realpath(fpath)
-                if real in seen:
-                    continue
-                seen.add(real)
-                if os.path.realpath(self_claude_md) == real:
-                    continue  # retirement notice lives here — leave it
-                try:
-                    with open(real, "r", encoding="utf-8", errors="replace") as f:
-                        lines = f.readlines()
-                except OSError:
-                    continue
-                hits = [(i + 1, ln.rstrip("\n"))
-                        for i, ln in enumerate(lines) if STALE_RE.search(ln)]
-                if hits:
-                    findings.append((fpath, hits))
+                _scan_one(os.path.realpath(fpath), findings, seen, fpath)
+    for g in harness_globals:
+        if g and os.path.isfile(g):
+            _scan_one(os.path.realpath(g), findings, seen, g)
     return findings
+
+
+def apply_path_rewrites(findings, dry_run):
+    """Swap claude-memory->okfmem-store on 'path' lines only. Returns
+    (files_changed, lines_changed). Never edits 'notice'/'review' lines."""
+    files_changed = lines_changed = 0
+    for fpath, hits in findings:
+        path_linenos = {ln for ln, _, cat in hits if cat == "path"}
+        if not path_linenos:
+            continue
+        real = os.path.realpath(fpath)
+        with open(real, "r", encoding="utf-8", newline="") as f:
+            lines = f.readlines()
+        changed = False
+        for ln in path_linenos:
+            if 1 <= ln <= len(lines) and "claude-memory" in lines[ln - 1]:
+                lines[ln - 1] = lines[ln - 1].replace("claude-memory",
+                                                      "okfmem-store")
+                lines_changed += 1
+                changed = True
+        if changed:
+            files_changed += 1
+            if not dry_run:
+                with open(real, "w", encoding="utf-8", newline="") as f:
+                    f.writelines(lines)
+    return files_changed, lines_changed
 
 
 # ---------------------------------------------------------------------------
@@ -266,22 +324,34 @@ def cmd_run(store, dry_run, apply_cleanup):
         print(f"  {name:12} {action:10} {path}")
 
     print("\n== stale references ==")
-    findings = scan_stale(reg, harnesses["claude_code"] or "")
+    findings = scan_stale(reg, harnesses["claude_code"] or "",
+                          harness_globals=[harnesses["antigravity"]])
     if not findings:
         print("  none")
     else:
         total = sum(len(h) for _, h in findings)
-        print(f"  {total} line(s) across {len(findings)} file(s) "
-              f"reference retired systems:")
+        cats = {"path": 0, "notice": 0, "review": 0}
+        for _, hits in findings:
+            for _, _, cat in hits:
+                cats[cat] += 1
+        print(f"  {total} line(s) across {len(findings)} file(s): "
+              f"{cats['path']} path-swap, {cats['notice']} notice (kept), "
+              f"{cats['review']} manual-review")
         for fpath, hits in findings:
             print(f"  - {fpath}")
-            for lineno, text in hits[:6]:
-                print(f"      {lineno}: {text.strip()[:100]}")
+            for lineno, text, cat in hits[:6]:
+                print(f"      {lineno} [{cat}]: {text.strip()[:90]}")
             if len(hits) > 6:
                 print(f"      … +{len(hits) - 6} more")
         if apply_cleanup:
-            print("\n  --apply-cleanup requested: rewriting is not yet "
-                  "implemented (deferred to P4 hand-review). No files changed.")
+            fc, lc = apply_path_rewrites(findings, dry_run)
+            verb = "would rewrite" if dry_run else "rewrote"
+            print(f"\n  --apply-cleanup: {verb} {lc} path line(s) in {fc} "
+                  f"file(s) (claude-memory -> okfmem-store). "
+                  f"notice/review lines untouched.")
+            if cats["review"]:
+                print(f"  ! {cats['review']} 'review' line(s) need a human — "
+                      f"not edited.")
         else:
             print("\n  (detection only — rewrite gated behind --apply-cleanup)")
 
@@ -311,9 +381,16 @@ def cmd_status(store):
         print(f"\n  registry: MISSING ({reg_path})")
 
     reg = build_registry(store, os.path.join(home, ".claude", "projects"))[0]
-    findings = scan_stale(reg, harnesses["claude_code"] or "")
+    findings = scan_stale(reg, harnesses["claude_code"] or "",
+                          harness_globals=[harnesses["antigravity"]])
     total = sum(len(h) for _, h in findings)
-    print(f"  stale refs: {total} line(s) across {len(findings)} file(s)")
+    cats = {"path": 0, "notice": 0, "review": 0}
+    for _, hits in findings:
+        for _, _, cat in hits:
+            cats[cat] += 1
+    print(f"  stale refs: {total} line(s) across {len(findings)} file(s) "
+          f"({cats['path']} path-swap, {cats['notice']} notice, "
+          f"{cats['review']} review)")
 
 
 def main():
@@ -323,7 +400,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, write nothing")
     ap.add_argument("--apply-cleanup", action="store_true",
-                    help="(deferred) also rewrite stale references")
+                    help="rewrite claude-memory->okfmem-store on path lines "
+                         "(retirement-notice + review lines left untouched)")
     ap.add_argument("--store", default=os.environ.get(
         "OKFMEM_STORE", os.path.expanduser("~/okfmem-store")))
     args = ap.parse_args()

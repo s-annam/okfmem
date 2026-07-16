@@ -63,9 +63,12 @@ One-time (re-runnable to repair), cross-platform:
    the `~/.claude/projects/<encoded>/memory` symlink set; the encoded dir is
    decoded by filesystem probe (dir names may contain `-`).
 4. Scans registered project roots' `CLAUDE.md`/`AGENTS.md`/`CLAUDE.local.md`
-   for retired-system references (memgraph, ck, projector, …) — **detection +
-   report only**; rewriting is gated behind `--apply-cleanup` (deferred to
-   hand-review).
+   plus the harness globals for retired-system references and classifies each
+   hit: **path** (a `claude-memory` → `okfmem-store` rename, the one thing
+   `--apply-cleanup` rewrites automatically), **notice** (a retirement note
+   that tells agents to ignore leftovers — left as-is), or **review** (flagged
+   but needs a human, never auto-edited). Detection is default; `--apply-cleanup`
+   performs the path swaps.
 
 `--status` / `okfmem status` prints wiring + drift.
 
@@ -111,8 +114,8 @@ mode if the store tree is already dirty (unless `--force`/`--no-commit`).
 
 - **P1 — decay frontmatter + backfill** ✅
 - **P2 — init wrapper (pointers + registry + stale-ref detection)** ✅
-- **P3 — consolidation job** (`memory_consolidate.py`) ✅ — dry-run tuned; Stop hook wiring below
-- **P4 — retire manual `/memory-curate`; rewrite continuity blocks** — not yet built
+- **P3 — consolidation job** (`memory_consolidate.py`) ✅ — dry-run tuned; Stop hook live
+- **P4 — `--apply-cleanup` path-swap rewrite; `/memory-curate` demoted to fallback; continuity blocks on okfmem** ✅
 
 ### Wiring the Stop hook (P3 go-live)
 
