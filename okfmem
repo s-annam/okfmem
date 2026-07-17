@@ -15,7 +15,7 @@ import os
 import runpy
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlink -> real engine dir
 MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "consolidate": "memory_consolidate.py", "sync": "memory_sync.py"}
 
