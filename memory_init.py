@@ -77,7 +77,9 @@ MARKER_CLOSE = "<!-- /MEMORY-POINTER -->"
 POINTER_BODY = """## Memory
 Durable project memory: `~/okfmem-store/projects/<PROJECT>/`
 `<PROJECT>` = basename of the git root, unless overridden in `~/okfmem-store/registry.json`.
-- Read `MEMORY.md` (the index) first — one grep-friendly line per topic page.
+- **At session start, eagerly read `STATE.md`** (bounded active-state snapshot) and
+  `MEMORY.md` (the topic index) from that dir. Harnesses without native memory
+  auto-load (e.g. Antigravity) MUST read both up front — do not wait to be asked.
 - To recall a topic: grep the memory dir for keywords, then open the matching `<slug>.md`.
   Do NOT eager-read every page.
 - Pages are OKF markdown. Frontmatter (`pinned`/`importance`/`status`/`access_count`) is
