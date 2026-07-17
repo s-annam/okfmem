@@ -18,7 +18,7 @@ By keeping them separate, your data never leaves your machine unless you push it
 
 ## Quickstart
 
-Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs on macOS and Windows.
+Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs natively on macOS and Linux. For Windows, run these commands inside **WSL (Windows Subsystem for Linux)** or **Git Bash**.
 
 ```bash
 # 1. Clone the engine (this repo)
