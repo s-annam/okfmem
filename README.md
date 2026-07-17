@@ -16,6 +16,55 @@ yours):
 The engine locates the store via, in order: `--store PATH`, `$OKFMEM_STORE`,
 then `~/okfmem-store`.
 
+## Quickstart
+
+```bash
+# 1. Clone the engine (this repo)
+git clone https://github.com/s-annam/okfmem.git ~/okfmem
+
+# 2. Create YOUR store — a private repo you own; memory pages never leave it.
+#    Empty is fine; the engine populates it. Any of:
+#      a) fork/create a private "okfmem-store" on your host, then:
+#         git clone git@github.com:<you>/okfmem-store.git ~/okfmem-store
+#      b) or just start local and add a remote later:
+#         mkdir ~/okfmem-store && git -C ~/okfmem-store init
+#    Store elsewhere? Set OKFMEM_STORE or pass --store PATH (see below).
+
+# 3. Put the CLI on PATH (~/.local/bin assumed already on PATH)
+ln -s ~/okfmem/okfmem ~/.local/bin/okfmem
+okfmem --help          # verify
+
+# 4. Wire it up (idempotent; re-runnable to repair)
+okfmem backfill        # P1 — stamp decay frontmatter on every page
+okfmem init            # P2 — write harness pointers + build registry.json
+okfmem status          # confirm wiring + drift
+
+# 5. Enable sleep-time consolidation (P3) — add the Stop hook, see below
+```
+
+Requirements: Python 3 (stdlib only — no PyYAML/pip deps), `git`. Runs the same
+on macOS and Windows.
+
+### PATH
+
+Step 3 symlinks `okfmem` into `~/.local/bin`, which is on PATH on most setups.
+Check with `command -v okfmem` (should print the symlink) or
+`echo "$PATH" | tr ':' '\n' | grep -q "$HOME/.local/bin" && echo ok`.
+
+- **`~/.local/bin` not on PATH?** Add it — `export PATH="$HOME/.local/bin:$PATH"`
+  in `~/.zshrc` / `~/.bashrc` (Windows: add the dir via *System → Environment
+  Variables*, or use Git Bash's `~/.bashrc`).
+- **Prefer another bin dir?** Symlink there instead:
+  `ln -s ~/okfmem/okfmem /usr/local/bin/okfmem`.
+- **No symlink at all?** The `okfmem` script has a shebang and is `+x`, so invoke
+  it by full path: `~/okfmem/okfmem <cmd>` (or `python3 ~/okfmem/okfmem <cmd>`).
+
+### Store location
+
+Default `~/okfmem-store`. Elsewhere? Set `$OKFMEM_STORE` (export it in your
+shell rc) or pass `--store PATH` to any command. Resolution order:
+`--store` → `$OKFMEM_STORE` → `~/okfmem-store`.
+
 ## Commands
 
 ```bash
