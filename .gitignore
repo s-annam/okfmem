@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .DS_Store
 COMMIT_EDITMSG
+# session-search derived cache — rebuildable, NEVER committed (#20)
+*.db
+.cache/

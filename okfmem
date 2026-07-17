@@ -8,8 +8,14 @@ Usage:
   okfmem sync        -m "<msg>" [--no-push] ...  # commit + pull-rebase + push
   okfmem status                                  # alias for `init --status`
 
-Subcommands map to the memory_*.py modules living beside this script. Store is
-resolved by each module: --store, else $OKFMEM_STORE, else ~/okfmem-store.
+Core subcommands map to the memory_*.py modules living beside this script. Store
+is resolved by each module: --store, else $OKFMEM_STORE, else ~/okfmem-store.
+
+OPT-IN plugins live in plugins/memory_<cmd>.py and route lazily — the core map
+stays harness-agnostic, so an unknown command loads a plugin only if that file
+exists. Session search (s-annam/tools#20) ships this way:
+  okfmem index  [--rebuild]        # build FTS5 index over harness transcripts
+  okfmem search "<query>"          # query it (off-prompt)
 """
 import os
 import runpy
@@ -18,6 +24,9 @@ import sys
 HERE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlink -> real engine dir
 MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "consolidate": "memory_consolidate.py", "sync": "memory_sync.py"}
+# Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
+# so core install stays harness-agnostic. Several commands may share one plugin.
+PLUGINS = {"index": "memory_search.py", "search": "memory_search.py"}
 
 
 def main():
@@ -29,12 +38,19 @@ def main():
     cmd, rest = argv[0], argv[1:]
     if cmd == "status":
         cmd, rest = "init", ["--status"] + rest
-    if cmd not in MODULES:
+
+    if cmd in MODULES:
+        target = os.path.join(HERE, MODULES[cmd])
+    elif cmd in PLUGINS and os.path.exists(os.path.join(HERE, "plugins", PLUGINS[cmd])):
+        # keep the subcommand token so the plugin's own parser sees `index`/`search`
+        target = os.path.join(HERE, "plugins", PLUGINS[cmd])
+        rest = [cmd] + rest
+    else:
         print(f"okfmem: unknown command '{cmd}'\n{__doc__}", file=sys.stderr)
         sys.exit(2)
 
-    sys.argv = [MODULES[cmd]] + rest
-    runpy.run_path(os.path.join(HERE, MODULES[cmd]), run_name="__main__")
+    sys.argv = [os.path.basename(target)] + rest
+    runpy.run_path(target, run_name="__main__")
 
 
 if __name__ == "__main__":
