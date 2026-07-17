@@ -35,6 +35,40 @@ import shutil
 import sys
 
 # ---------------------------------------------------------------------------
+# Output formatting — TTY-gated color + status glyphs, ASCII-safe when piped
+# ---------------------------------------------------------------------------
+_ANSI = {"reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+         "green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}
+
+
+def _use_color():
+    return (sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+            and os.environ.get("TERM") != "dumb")
+
+
+def _c(s, style):
+    return f"{_ANSI[style]}{s}{_ANSI['reset']}" if _use_color() else s
+
+
+# kind -> (unicode glyph, ascii fallback, color)
+_GLYPH = {"ok": ("✓", "ok", "green"),
+          "chg": ("~", "~", "yellow"),
+          "warn": ("!", "!", "red")}
+
+
+def glyph(kind):
+    uni, ascii_, color = _GLYPH[kind]
+    ch = uni if _use_color() else ascii_
+    return _c(ch, color)
+
+
+def _short(path):
+    """Collapse the home prefix to ~ for compact, portable-looking paths."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+
+
+# ---------------------------------------------------------------------------
 # Managed pointer block
 # ---------------------------------------------------------------------------
 MARKER_OPEN = "<!-- MEMORY-POINTER v1 (managed by memory-init — do not edit between markers) -->"
@@ -176,12 +210,20 @@ def _registry_shell(mapping, overrides):
 
 
 def write_registry(store, reg, dry_run):
+    """Write registry.json only when its content actually changes. Returns
+    (path, changed) so the caller can report accurately and avoid needless
+    writes on a re-run of an already-wired setup."""
     path = os.path.join(store, "registry.json")
     text = json.dumps(reg, indent=2) + "\n"
-    if not dry_run:
+    old = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            old = f.read()
+    changed = old != text
+    if changed and not dry_run:
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
-    return path
+    return path, changed
 
 
 # ---------------------------------------------------------------------------
@@ -350,77 +392,139 @@ def link_skills(dry_run):
     return actions
 
 
-def cmd_run(store, dry_run, apply_cleanup):
+def cmd_run(store, dry_run, apply_cleanup, verbose=False):
+    """Wire the store into every harness and report the result.
+
+    Output is quiet-by-default: each of the five steps prints ONE status line
+    (glyph + summary); a step only expands to per-item detail when it has
+    something that would change, or under --verbose. A final verdict line says
+    whether anything needs doing. `changes` counts would-change/changed items
+    across all steps and drives that verdict.
+    """
     home = os.path.expanduser("~")
     claude_projects = os.path.join(home, ".claude", "projects")
     harnesses = detect_harnesses()
+    mode = "dry-run" if dry_run else "apply"
+    changes = 0
 
-    print("== harnesses ==")
-    for name, path in harnesses.items():
-        print(f"  {name:12} {'DETECTED  ' + path if path else 'not found'}")
+    print(_c("okfmem init", "bold") + _c(f"  ·  {mode}", "dim") + "\n")
 
-    print("\n== registry ==")
+    # --- 1. harnesses ------------------------------------------------------
+    missing = [n for n, p in harnesses.items() if not p]
+    ndet = len(harnesses) - len(missing)
+    summary = f"{ndet} detected" + (f", {len(missing)} not found" if missing else "")
+    print(f"{glyph('warn' if missing else 'ok')} harnesses   {summary}")
+    if verbose or missing:
+        for name, path in harnesses.items():
+            k = "ok" if path else "warn"
+            print(f"    {glyph(k)} {name:12} {_short(path) if path else 'not found'}")
+
+    # --- 2. registry -------------------------------------------------------
     reg, drift = build_registry(store, claude_projects)
-    reg_path = write_registry(store, reg, dry_run)
-    print(f"  {len(reg['map'])} roots mapped, {len(reg['overrides'])} overrides"
-          f"  -> {reg_path}")
-    for root, proj in reg["overrides"].items():
-        print(f"    override: {root} -> {proj}")
+    reg_path, reg_changed = write_registry(store, reg, dry_run)
+    changes += 1 if reg_changed else 0
+    detail = f"{len(reg['map'])} projects" + (
+        f", {len(reg['overrides'])} renamed" if reg["overrides"] else "")
+    if reg_changed:
+        print(f"{glyph('chg')} registry    "
+              f"{'would update' if dry_run else 'updated'} ({detail})")
+    else:
+        print(f"{glyph('ok')} registry    up to date ({detail})")
+    if verbose and reg["overrides"]:
+        for root, proj in reg["overrides"].items():
+            print(f"    {_short(root)} → {proj}")
     for d in drift:
-        print(f"  drift: {d}")
+        print(f"    {glyph('warn')} {d}")
 
-    print("\n== pointers ==")
-    for name, path in harnesses.items():
-        if not path:
-            continue
-        action = upsert_pointer(path, dry_run)
-        print(f"  {name:12} {action:10} {path}")
+    # --- 3. pointers -------------------------------------------------------
+    pacts = [(n, upsert_pointer(p, dry_run), p)
+             for n, p in harnesses.items() if p]
+    pchg = [a for a in pacts if a[1] != "unchanged"]
+    changes += len(pchg)
+    if pchg:
+        print(f"{glyph('chg')} pointers    "
+              f"{len(pchg)} to write ({len(pacts)} harness globals)")
+    else:
+        print(f"{glyph('ok')} pointers    up to date ({len(pacts)} harness globals)")
+    if verbose or pchg:
+        for name, action, path in pacts:
+            k = "ok" if action == "unchanged" else "chg"
+            print(f"    {glyph(k)} {name:12} {action:10} {_short(path)}")
 
-    print("\n== stale references ==")
+    # --- 4. stale references ----------------------------------------------
     findings = scan_stale(reg, harnesses["claude_code"] or "",
                           harness_globals=[harnesses["antigravity"]])
-    if not findings:
-        print("  none")
+    total = sum(len(h) for _, h in findings)
+    cats = {"path": 0, "notice": 0, "review": 0}
+    for _, hits in findings:
+        for _, _, cat in hits:
+            cats[cat] += 1
+    actionable = cats["path"] + cats["review"]  # notices are expected, not work
+    if total == 0:
+        print(f"{glyph('ok')} stale refs  none")
     else:
-        total = sum(len(h) for _, h in findings)
-        cats = {"path": 0, "notice": 0, "review": 0}
-        for _, hits in findings:
-            for _, _, cat in hits:
-                cats[cat] += 1
-        print(f"  {total} line(s) across {len(findings)} file(s): "
-              f"{cats['path']} path-swap, {cats['notice']} notice (kept), "
-              f"{cats['review']} manual-review")
+        parts = []
+        if cats["path"]:
+            parts.append(f"{cats['path']} to rewrite")
+        if cats["review"]:
+            parts.append(f"{cats['review']} need review")
+        if cats["notice"]:
+            parts.append(f"{cats['notice']} notice"
+                         f"{'s' if cats['notice'] != 1 else ''} (kept)")
+        kind = "ok" if not actionable else ("warn" if cats["review"] else "chg")
+        print(f"{glyph(kind)} stale refs  {total} across "
+              f"{len(findings)} file(s): {', '.join(parts)}")
+        # detail: everything under --verbose, else only actionable hits
         for fpath, hits in findings:
-            print(f"  - {fpath}")
-            for lineno, text, cat in hits[:6]:
-                print(f"      {lineno} [{cat}]: {text.strip()[:90]}")
-            if len(hits) > 6:
-                print(f"      … +{len(hits) - 6} more")
+            show = hits if verbose else [h for h in hits if h[2] != "notice"]
+            if not show:
+                continue
+            print(f"    {_short(fpath)}")
+            for lineno, text, cat in show[:6]:
+                gk = {"path": "chg", "review": "warn", "notice": "ok"}[cat]
+                print(f"      {glyph(gk)} L{lineno} {cat}: {text.strip()[:78]}")
+            if len(show) > 6:
+                print(f"      … +{len(show) - 6} more")
         if apply_cleanup:
             fc, lc = apply_path_rewrites(findings, dry_run)
+            changes += lc
             verb = "would rewrite" if dry_run else "rewrote"
-            print(f"\n  --apply-cleanup: {verb} {lc} path line(s) in {fc} "
-                  f"file(s) (claude-memory -> okfmem-store). "
-                  f"notice/review lines untouched.")
+            print(f"    → {verb} {lc} path line(s) in {fc} file(s); "
+                  f"notice/review lines untouched")
             if cats["review"]:
-                print(f"  ! {cats['review']} 'review' line(s) need a human — "
-                      f"not edited.")
-        else:
-            print("\n  (detection only — rewrite gated behind --apply-cleanup)")
+                print(f"    {glyph('warn')} {cats['review']} review line(s) "
+                      f"need a human — not edited")
+        elif cats["path"]:
+            print(_c(f"    → run with --apply-cleanup to rewrite "
+                     f"{cats['path']} path line(s)", "dim"))
 
-    print("\n== skills ==")
+    # --- 5. skills ---------------------------------------------------------
     sk = link_skills(dry_run)
     if not sk:
-        print("  no engine skills to link (or no harness skill dirs)")
+        print(f"{glyph('warn')} skills      none to link (no harness skill dirs)")
     else:
-        changed = [a for a in sk if a[2] not in ("ok",)]
-        for harness, name, action in changed:
-            print(f"  {harness:12} {action:16} {name}")
-        n_ok = sum(1 for a in sk if a[2] == "ok")
-        print(f"  {len(changed)} change(s), {n_ok} already linked")
+        chg = [a for a in sk if a[2] != "ok"]
+        changes += len(chg)
+        n_ok = len(sk) - len(chg)
+        if chg:
+            print(f"{glyph('chg')} skills      "
+                  f"{len(chg)} to link ({n_ok} already linked)")
+        else:
+            print(f"{glyph('ok')} skills      all linked ({n_ok})")
+        if verbose or chg:
+            for harness, name, action in chg:
+                print(f"    {glyph('chg')} {harness:12} {action:16} {name}")
 
-    print(f"\nstore: {store}")
-    print(f"mode: {'DRY-RUN' if dry_run else 'APPLY'}")
+    # --- verdict -----------------------------------------------------------
+    print()
+    tail = _c(f"({_short(store)} · {mode})", "dim")
+    if changes == 0:
+        print(f"{glyph('ok')} {_c('fully wired', 'bold')} — nothing to do  {tail}")
+    else:
+        verb = "would change" if dry_run else "changed"
+        print(f"{glyph('chg')} {_c(f'{changes} item(s) {verb}', 'bold')}  {tail}")
+        if dry_run:
+            print(_c("    re-run without --dry-run to apply", "dim"))
 
 
 def cmd_status(store):
@@ -475,6 +579,9 @@ def main():
                     help="print wiring + drift, change nothing")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, write nothing")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="expand every step to per-item detail (default: quiet — "
+                         "idle steps collapse to one line)")
     ap.add_argument("--apply-cleanup", action="store_true",
                     help="rewrite claude-memory->okfmem-store on path lines "
                          "(retirement-notice + review lines left untouched)")
@@ -490,7 +597,7 @@ def main():
     if args.status:
         cmd_status(store)
     else:
-        cmd_run(store, args.dry_run, args.apply_cleanup)
+        cmd_run(store, args.dry_run, args.apply_cleanup, args.verbose)
 
 
 if __name__ == "__main__":
