@@ -297,6 +297,59 @@ def apply_path_rewrites(findings, dry_run):
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+def skill_dirs():
+    """Harness skill directories that exist on this machine, keyed by name.
+
+    The engine self-installs its skills here so a fresh `git clone ~/okfmem &&
+    okfmem init` surfaces /okfmem, /okfmem-save, /okfmem-curate in every harness
+    present — no dependency on ~/tools/sync-skills.sh (which still fans the
+    back-compat alias names primer/memory-curate from ~/tools/skills)."""
+    home = os.path.expanduser("~")
+    out = {}
+    if os.path.isdir(os.path.join(home, ".claude")):
+        out["claude_code"] = os.path.join(home, ".claude", "skills")
+    if os.path.isdir(os.path.join(home, ".codex")):
+        out["codex"] = os.path.join(home, ".codex", "skills")
+    if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("agy"):
+        out["antigravity"] = os.path.join(home, ".gemini", "config", "skills")
+    return out
+
+
+def link_skills(dry_run):
+    """Symlink every engine skill (~/okfmem/skills/<name>/SKILL.md) into each
+    detected harness skill dir. Idempotent; never deletes a real (non-symlink)
+    entry. Returns a list of (harness, name, action) tuples for reporting."""
+    engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+    actions = []
+    if not os.path.isdir(engine):
+        return actions
+    names = sorted(n for n in os.listdir(engine)
+                   if os.path.isfile(os.path.join(engine, n, "SKILL.md")))
+    for harness, dest in skill_dirs().items():
+        if not dry_run:
+            os.makedirs(dest, exist_ok=True)
+        for name in names:
+            target = os.path.join(engine, name)
+            link = os.path.join(dest, name)
+            if os.path.islink(link):
+                if os.readlink(link) == target:
+                    actions.append((harness, name, "ok"))
+                    continue
+                action = "repoint"
+                if not dry_run:
+                    os.remove(link)
+                    os.symlink(target, link)
+            elif os.path.exists(link):
+                actions.append((harness, name, "skip (real file)"))
+                continue
+            else:
+                action = "link"
+                if not dry_run:
+                    os.symlink(target, link)
+            actions.append((harness, name, action))
+    return actions
+
+
 def cmd_run(store, dry_run, apply_cleanup):
     home = os.path.expanduser("~")
     claude_projects = os.path.join(home, ".claude", "projects")
@@ -355,6 +408,17 @@ def cmd_run(store, dry_run, apply_cleanup):
         else:
             print("\n  (detection only — rewrite gated behind --apply-cleanup)")
 
+    print("\n== skills ==")
+    sk = link_skills(dry_run)
+    if not sk:
+        print("  no engine skills to link (or no harness skill dirs)")
+    else:
+        changed = [a for a in sk if a[2] not in ("ok",)]
+        for harness, name, action in changed:
+            print(f"  {harness:12} {action:16} {name}")
+        n_ok = sum(1 for a in sk if a[2] == "ok")
+        print(f"  {len(changed)} change(s), {n_ok} already linked")
+
     print(f"\nstore: {store}")
     print(f"mode: {'DRY-RUN' if dry_run else 'APPLY'}")
 
@@ -391,6 +455,18 @@ def cmd_status(store):
     print(f"  stale refs: {total} line(s) across {len(findings)} file(s) "
           f"({cats['path']} path-swap, {cats['notice']} notice, "
           f"{cats['review']} review)")
+
+    sk = link_skills(dry_run=True)
+    if sk:
+        pending = [a for a in sk if a[2] != "ok"]
+        by_h = {}
+        for harness, _, _ in sk:
+            by_h[harness] = by_h.get(harness, 0) + 1
+        wired = ", ".join(f"{h}:{c}" for h, c in sorted(by_h.items()))
+        note = f"  skills: {wired}"
+        if pending:
+            note += f"  ({len(pending)} not linked — run `okfmem init`)"
+        print(note)
 
 
 def main():

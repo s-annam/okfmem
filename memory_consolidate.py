@@ -37,6 +37,10 @@ import subprocess
 import sys
 from datetime import date, datetime, timezone
 
+# Shared git commit+push path (pull-rebase + lock) lives beside this script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from memory_sync import sync_store  # noqa: E402
+
 SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 DECAY_EXEMPT_TYPES = {"user", "feedback"}
 
@@ -340,20 +344,17 @@ def git_clean(store):
 
 
 def git_commit_push(store, n_archived, n_bumped, do_push):
-    subprocess.run(["git", "-C", store, "add", "-A", "projects"], timeout=60)
+    """Commit + push via the shared `okfmem sync` path (pull-rebase + lock).
+    Stages the whole tree so decay_state.json (store root) rides along too —
+    the old `add -A projects` left it uncommitted."""
     msg = (f"chore(okfmem): consolidate — archived {n_archived}, "
            f"reinforced {n_bumped}")
-    r = subprocess.run(["git", "-C", store, "commit", "-m", msg],
-                       capture_output=True, text=True, timeout=60)
-    if r.returncode != 0:
-        print(f"  commit skipped: {r.stdout.strip() or r.stderr.strip()}")
-        return
-    print(f"  committed: {msg}")
-    if do_push:
-        p = subprocess.run(["git", "-C", store, "push"],
-                           capture_output=True, text=True, timeout=120)
-        print("  pushed." if p.returncode == 0
-              else f"  push failed: {p.stderr.strip()}")
+    res = sync_store(store, msg, do_push=do_push)
+    print(f"  {res['reason']}")
+    if res["pushed"]:
+        print("  pushed.")
+    elif res["push_error"]:
+        print(f"  push failed: {res['push_error']}")
 
 
 def main():

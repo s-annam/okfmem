@@ -5,6 +5,7 @@ Usage:
   okfmem backfill    [--dry-run] [--store PATH]  # P1: stamp decay frontmatter
   okfmem init        [--dry-run] [--status] ...  # P2: pointers + registry
   okfmem consolidate [--dry-run] ...             # P3: decay + archive + push
+  okfmem sync        -m "<msg>" [--no-push] ...  # commit + pull-rebase + push
   okfmem status                                  # alias for `init --status`
 
 Subcommands map to the memory_*.py modules living beside this script. Store is
@@ -16,7 +17,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
-           "consolidate": "memory_consolidate.py"}
+           "consolidate": "memory_consolidate.py", "sync": "memory_sync.py"}
 
 
 def main():
