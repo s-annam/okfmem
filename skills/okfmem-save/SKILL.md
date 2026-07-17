@@ -1,7 +1,7 @@
 ---
 name: okfmem-save
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__claude_ai_Linear__get_issue, mcp__claude_ai_Linear__save_comment, mcp__claude_ai_Linear__list_comments, mcp__linear__get_issue, mcp__linear__save_comment, mcp__linear__list_comments
-description: Session close-out — clean up tool-created worktrees/branches, write active state to STATE.md, capture durable insights as memory pages, and commit + push okfmem-store via `okfmem sync`. Drafts an impl-complete comment on the resolved issue (Linear via MCP, GitHub via `gh issue comment`). Invoked as /okfmem-save (alias: /primer).
+description: "Session close-out — clean up tool-created worktrees/branches, write active state to STATE.md, capture durable insights as memory pages, and commit + push okfmem-store via `okfmem sync`. Drafts an impl-complete comment on the resolved issue (Linear via MCP, GitHub via `gh issue comment`). Invoked as /okfmem-save (alias: /primer)."
 ---
 
 # /okfmem-save — Write active state + capture insights + commit & push okfmem-store
