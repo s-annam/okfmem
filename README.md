@@ -1,7 +1,7 @@
 # okfmem — self-maintaining OKF markdown memory engine
 
-**The Problem:** AI coding agents suffer from amnesia between sessions and get bloated if they read too much context.
-**The Solution:** A plain-markdown, git-portable memory system that auto-loads a tiny index, retrieves details on demand, and automatically decays stale information.
+**The Problem:** There is a fundamental difference between an *append-only log* and a true *memory system*. While agents like Claude Code have native memory features (e.g., auto-loading a `MEMORY.md` index), they lack lifecycle management. Over time, they act as endless scratchpads that accumulate clutter, ultimately degrading reasoning ("Lost in the Middle"). Conversely, advanced frameworks like Hermes solve this with dedicated tiered memory, but they rely on local databases (like SQLite) and are tightly coupled to their own ecosystems.
+**The Solution:** `okfmem` brings a Hermes-style, self-maintaining memory architecture to your existing CLI agents. By sitting on top of native features (like Claude Code's file reading), it adds mathematical decay, Open Knowledge Format (OKF) metadata, and automatic archival to keep your agent's context window lean. Like Hermes, it also provides an opt-in SQLite full-text search index over your past sessions—but safely isolated as a rebuildable, git-ignored local cache.
 
 Storage uses [Google's Open Knowledge Format (OKF) v0.1][okf] — one markdown page per topic, YAML frontmatter, plain-markdown links. No database, no server.
 
@@ -78,6 +78,9 @@ An idempotent tool that stamps required YAML frontmatter (like `importance`, `pi
 ### 4. Status Check (`okfmem status`)
 Run this anytime to view the wiring status, detected harnesses, and if your store has any uncommitted changes.
 
+### 5. Session Search (`okfmem search`)
+An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). Just like Hermes' database layer, this allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.
+
 ```mermaid
 flowchart TD
     subgraph Harness [AI Coding Agent]
@@ -98,7 +101,9 @@ flowchart TD
 By default, the store is created at `~/okfmem-store`. To put it elsewhere, set `$OKFMEM_STORE` in your shell profile or pass `--store PATH` to any command.
 
 ---
-Design & research: `okfmem-store/design/memory-v2-self-maintaining-design.md` and [s-annam/tools#19].
+Design & research: `okfmem-store/design/memory-v2-self-maintaining-design.md`.
 
 [okf]: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
-[s-annam/tools#19]: https://github.com/s-annam/tools/issues/19
+[memgpt]: https://arxiv.org/abs/2310.08560
+[lost-in-the-middle]: https://arxiv.org/abs/2307.03172
+[generative-agents]: https://arxiv.org/abs/2304.03442
