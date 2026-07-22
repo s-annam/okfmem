@@ -5,9 +5,31 @@
        alt="okfmem demo — the always-loaded MEMORY.md index, both agent harnesses wired, and okfmem consolidate --dry-run archiving stale pages while keeping the hot and pinned ones">
 </p>
 
-**The Problem:** Native agent memory (e.g. Claude Code auto-loading a `MEMORY.md` index) has no lifecycle management. Pages only accumulate, so the index grows into an endless scratchpad and the signal gets buried mid-context ("Lost in the Middle"). Frameworks like Hermes fix this with tiered memory, but they lean on their own local databases and stay coupled to their ecosystem.
+## Why okfmem
 
-**The Solution:** `okfmem` brings a Hermes-style, self-maintaining memory architecture to your existing CLI agents. By sitting on top of native features (like Claude Code's file reading), it adds mathematical decay, Open Knowledge Format (OKF) metadata, and automatic archival to keep your agent's context window lean. Like Hermes, it also provides an opt-in SQLite full-text search index over your past sessions—but safely isolated as a rebuildable, git-ignored local cache.
+I didn't set out to build this. For months I ran memgraph as the
+store and kept my own tooling deliberately thin — a set of wrapper skills to save
+memory as I worked and read it back at the start of a new session. The goal was to
+lean on a third-party engine and not maintain my own.
+
+It worked well, but it was slow, and nothing ever decayed — the automatic
+forgetting layer was a phase I never got working on top of it, so I hand-cleaned
+constantly. It was also complex: a background daemon pushed my memory to git on a
+timer, and during a migration a leftover copy on a *second* machine fired at the
+wrong moment — a blind `git add -A && commit && push` that propagated an
+18,435-line deletion across every project onto the branch all my machines share.
+Claude recovered it with `git merge -s ours` (keep the known-good local tree, no
+force-push). But the complexity had shown itself: the architecture I'd adopted to
+avoid building wasn't buying safety, it *was* the risk.
+
+Even then I tried not to build. I re-surveyed the space (it has genuinely filled
+in — agentmemory, hippo-memory and others now do
+decay well), but every serious one I found is DB/engine-backed with markdown as an
+*export*. I wanted the inverse, so I built the smallest thing that does it.
+
+**The Problem:** Native agent memory (e.g. Claude Code auto-loading a `MEMORY.md` index) has no lifecycle management. Pages only accumulate, so the index grows into an endless scratchpad and the signal gets buried mid-context ("Lost in the Middle"). DB-backed frameworks fix this with tiered memory, but they lean on their own local databases and stay coupled to their ecosystem — your markdown is only ever an export.
+
+**The Solution:** `okfmem` brings a self-maintaining memory architecture to your existing CLI agents without a database. By sitting on top of native features (like Claude Code's file reading), it adds mathematical decay, Open Knowledge Format (OKF) metadata, and automatic archival to keep your agent's context window lean. It also provides an opt-in SQLite full-text search index over your past sessions—but safely isolated as a rebuildable, git-ignored local cache.
 
 Storage uses [Google's Open Knowledge Format (OKF) v0.1][okf] — one markdown page per topic, YAML frontmatter, plain-markdown links. No database, no server.
 
@@ -32,7 +54,7 @@ The usual objection is "how is this different from just writing markdown files?"
 |---|---|---|---|---|---|
 | **okfmem** | plain OKF markdown in git | no (session-end hook) | no | yes (Claude Code + Antigravity) | yes (Ebbinghaus, never deletes) |
 | Claude Code native memory | markdown | no | no | no (Claude Code only) | no (grows unbounded) |
-| ai-memory | SQLite | yes | yes | no | yes |
+| agentmemory | SQLite / vector | yes | yes | no | yes |
 | hippo-memory | SQLite (markdown = mirror) | yes (daily runner) | yes | partial (hooks both prompts) | yes (half-life + access boost) |
 
 Every DB-backed alternative treats markdown as an export, not the store. okfmem's premise is the inverse: the markdown *is* the store, readable by any agent with `grep`.
@@ -100,7 +122,7 @@ An idempotent tool that stamps required YAML frontmatter (like `importance`, `pi
 Run this anytime to view the wiring status, detected harnesses, and if your store has any uncommitted changes.
 
 ### 5. Session Search (`okfmem search`)
-An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). Just like Hermes' database layer, this allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.
+An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). This allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.
 
 ```mermaid
 flowchart TD
