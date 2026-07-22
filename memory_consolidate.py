@@ -391,6 +391,17 @@ def main():
 
     if not args.dry_run and not args.no_commit and not args.force:
         if not git_clean(store):
+            # Consolidation is idempotent background maintenance; a dirty tree
+            # just means uncommitted memory writes (STATE.md, pages,
+            # decay_state.json) or an in-flight `okfmem sync` this session.
+            # As a Stop hook, degrade gracefully — skip this run and exit 0
+            # (it runs again next session on a clean tree). Only a manual
+            # invocation gets the actionable error.
+            if args.stdin_hook:
+                print("okfmem consolidate: store working tree dirty — "
+                      "skipping this run (uncommitted memory writes or an "
+                      "in-flight `okfmem sync`); will retry next session.")
+                sys.exit(0)
             print("error: store working tree is dirty — commit/stash first, "
                   "or pass --force / --no-commit.", file=sys.stderr)
             sys.exit(3)
