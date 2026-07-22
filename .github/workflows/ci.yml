@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Merge-queue entries run on a temporary `gh-readonly-queue/*` branch and emit
+  # a `merge_group` event, not `pull_request`/`push`. Without this the required
+  # `verify` check never runs on the queue branch and every queued PR stalls.
+  # Keep in lockstep with the "Require merge queue" branch protection on `main`.
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The one unrecoverable gate: the repo is public, so a private string in a
+      # tracked file is the failure mode that's expensive to walk back. Runs
+      # FIRST so a leak fails fast, before lint/tests. Pure stdlib, no deps.
+      - name: Leak gate
+        run: python3 scripts/check-leaks.py
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # Lint is advisory for now: the engine predates this CI, so a hard style
+      # gate would block on pre-existing findings. `continue-on-error` surfaces
+      # them without failing the build; flip to a hard gate once the baseline is
+      # clean (mirrors offlinecv's report-only fallow step).
+      - name: Ruff lint (advisory)
+        continue-on-error: true
+        run: ruff check .
+
+      - name: Ruff format check (advisory)
+        continue-on-error: true
+        run: ruff format --check .
+
+      # pytest only if a suite exists — no tests today, so this no-ops cleanly
+      # instead of failing on "no tests collected".
+      - name: Tests
+        run: |
+          if [ -d tests ] || git ls-files '*_test.py' 'test_*.py' | grep -q .; then
+            pip install pytest
+            pytest -q
+          else
+            echo "No test suite found — skipping (tracked as a follow-up)."
+          fi

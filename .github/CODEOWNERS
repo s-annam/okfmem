@@ -1,0 +1,9 @@
+# Code owners for okfmem.
+#
+# Every PR that touches a matched path auto-requests a review from the owner,
+# and (with branch protection's "require review from Code Owners") needs an
+# owner's approval to merge. One owner today; add lines as co-maintainers join.
+#
+# Syntax: <path pattern>  <@owner ...>   (last matching line wins)
+
+* @s-annam
