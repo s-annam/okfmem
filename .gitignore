@@ -5,3 +5,5 @@ COMMIT_EDITMSG
 # session-search derived cache — rebuildable, NEVER committed (#20)
 *.db
 .cache/
+# internal-only: marketing, launch drafts, positioning notes — not shipped OSS
+internal/

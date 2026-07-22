@@ -1,5 +1,10 @@
 # okfmem — self-maintaining OKF markdown memory engine
 
+<p align="center">
+  <img src="docs/demo.gif" width="820"
+       alt="okfmem demo — the always-loaded MEMORY.md index, both agent harnesses wired, and okfmem consolidate --dry-run archiving stale pages while keeping the hot and pinned ones">
+</p>
+
 **The Problem:** Native agent memory (e.g. Claude Code auto-loading a `MEMORY.md` index) has no lifecycle management. Pages only accumulate, so the index grows into an endless scratchpad and the signal gets buried mid-context ("Lost in the Middle"). Frameworks like Hermes fix this with tiered memory, but they lean on their own local databases and stay coupled to their ecosystem.
 
 **The Solution:** `okfmem` brings a Hermes-style, self-maintaining memory architecture to your existing CLI agents. By sitting on top of native features (like Claude Code's file reading), it adds mathematical decay, Open Knowledge Format (OKF) metadata, and automatic archival to keep your agent's context window lean. Like Hermes, it also provides an opt-in SQLite full-text search index over your past sessions—but safely isolated as a rebuildable, git-ignored local cache.
