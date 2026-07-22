@@ -1,7 +1,7 @@
 """Claude Code extractor adapter — JSONL session transcripts -> normalized turns.
 
 Source: ~/.claude/projects/<project>/<uuid>.jsonl  (one JSON object per line).
-v1 target per issue s-annam/tools#20 — the easy, clean harness.
+v1 target per issue #2 — the easy, clean harness.
 
 Coupling to Claude's on-disk format lives HERE and nowhere else. Emits the
 harness-neutral turn schema from okfmem_session. Drops every tool_result body;
@@ -22,7 +22,7 @@ DEFAULT_ROOT = os.path.expanduser("~/.claude/projects")
 
 
 def _project_from_path(path):
-    """Claude encodes the project as the parent dir name (e.g. -Users-annam-tools)."""
+    """Claude encodes the project as the parent dir name (e.g. -Users-you-myproject)."""
     return os.path.basename(os.path.dirname(path))
 
 

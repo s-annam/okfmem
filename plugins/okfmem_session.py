@@ -3,7 +3,7 @@
 This is the ONE place coupling-free logic lives. Adapters (claude_code, agy) import
 `scrub`, `strip_signature`, and `Turn` from here; `memory_search.py` consumes the turns.
 
-Normalized turn (harness-neutral), per issue s-annam/tools#20:
+Normalized turn (harness-neutral), per issue #2:
     { harness, project, session_id, ts, idx, role, text, tool_name? }
 
 Security posture (locked by #20):

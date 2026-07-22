@@ -143,7 +143,7 @@ def detect_harnesses():
 # Encoded-dir -> real path (filesystem-probed; dir names may contain '-')
 # ---------------------------------------------------------------------------
 def decode_root(encoded):
-    """`-Users-annam-worktree-autosync` -> `/Users/annam/worktree-autosync`.
+    """`-Users-you-worktree-autosync` -> `/Users/you/worktree-autosync`.
 
     Claude Code encodes a cwd by replacing '/' with '-', which is lossy because
     directory names can themselves contain '-'. Reverse it by probing the real

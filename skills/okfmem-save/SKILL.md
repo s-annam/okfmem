@@ -114,7 +114,7 @@ The capture bar: decisions, engineering insights, reusable patterns, and lessons
 - ❌ issue status, assignee, milestone, review state, a plan for work that is now done
 - ✅ the **invariant the PR established** — e.g. "`collectAnchors` rejects a header when the two-column flatten interleaves the date cell" — which survives the PR, the branch, and the issue number
 
-The test is *durability under `git log`*, not importance-at-the-time. Capture the fact **stripped of its status wrapper** — the gotcha, not the changelog. Evidence: a 2026-07-13 curation pass on `~/resumelint` deleted 73 of 445 memory entries (16% of the store), almost all status wrappers; age was a dead signal (nothing over 90 days).
+The test is *durability under `git log`*, not importance-at-the-time. Capture the fact **stripped of its status wrapper** — the gotcha, not the changelog. Evidence: one curation pass on a real project deleted 73 of 445 memory entries (16% of the store), almost all status wrappers; age was a dead signal (nothing over 90 days).
 
 Each page is OKF v0.1: markdown with YAML frontmatter carrying a **top-level `type:`** field (`user` | `feedback` | `project` | `reference`).
 

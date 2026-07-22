@@ -3,7 +3,7 @@
 Source: ~/.gemini/antigravity-cli/history.jsonl  (plain JSONL, USER PROMPTS ONLY).
 Keys: conversationId, display, timestamp, workspace.
 
-v1 target per issue s-annam/tools#20 is deliberately COARSE: the full-turn
+v1 target per issue #2 is deliberately COARSE: the full-turn
 per-conversation store (`conversations/<uuid>.db`, protobuf `step_payload`) is
 opaque and DEFERRED. This adapter indexes only what history.jsonl exposes —
 the user's prompts — which is enough for "when did I ask about X" recall.

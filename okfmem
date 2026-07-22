@@ -13,7 +13,7 @@ is resolved by each module: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 
 OPT-IN plugins live in plugins/memory_<cmd>.py and route lazily — the core map
 stays harness-agnostic, so an unknown command loads a plugin only if that file
-exists. Session search (s-annam/tools#20) ships this way:
+exists. Session search (issue #2) ships this way:
   okfmem index  [--rebuild]        # build FTS5 index over harness transcripts
   okfmem search "<query>"          # query it (off-prompt)
 """

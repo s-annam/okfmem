@@ -6,6 +6,8 @@
 
 Storage uses [Google's Open Knowledge Format (OKF) v0.1][okf] — one markdown page per topic, YAML frontmatter, plain-markdown links. No database, no server.
 
+> A page read 3× survives ~3× longer; the always-loaded index stays ≤200 lines. Decay does the forgetting so the signal never gets buried mid-context.
+
 ## Architecture: Engine ⇄ Store Split
 
 Just like `chezmoi` separates the tool from your dotfiles, `okfmem` separates the engine from your private data.
@@ -16,6 +18,19 @@ Just like `chezmoi` separates the tool from your dotfiles, `okfmem` separates th
 | **`<user>/okfmem-store`** | The **Store** (Private) | Your data: `projects/*/`, `archive/`, `MEMORY.md`, `STATE.md` |
 
 By keeping them separate, your data never leaves your machine unless you push it to a private repo.
+
+## How It Compares
+
+The usual objection is "how is this different from just writing markdown files?" — the answer is lifecycle. okfmem keeps plain markdown as the *source of truth* while adding the decay and archival that raw files lack, and it does so with no database and no daemon.
+
+| | Source of truth | Daemon? | Database? | Cross-harness? | Decay / archival? |
+|---|---|---|---|---|---|
+| **okfmem** | plain OKF markdown in git | no (session-end hook) | no | yes (Claude Code + Antigravity) | yes (Ebbinghaus, never deletes) |
+| Claude Code native memory | markdown | no | no | no (Claude Code only) | no (grows unbounded) |
+| ai-memory | SQLite | yes | yes | no | yes |
+| hippo-memory | SQLite (markdown = mirror) | yes (daily runner) | yes | partial (hooks both prompts) | yes (half-life + access boost) |
+
+Every DB-backed alternative treats markdown as an export, not the store. okfmem's premise is the inverse: the markdown *is* the store, readable by any agent with `grep`.
 
 ## Quickstart
 
@@ -102,7 +117,10 @@ flowchart TD
 By default, the store is created at `~/okfmem-store`. To put it elsewhere, set `$OKFMEM_STORE` in your shell profile or pass `--store PATH` to any command.
 
 ---
-Design & research: `okfmem-store/design/memory-v2-self-maintaining-design.md`.
+Design & research: the full design, decay math, prior-art survey, and phased plan
+live in the tracked issues — [#1](https://github.com/s-annam/okfmem/issues/1)
+(self-maintaining memory) and [#2](https://github.com/s-annam/okfmem/issues/2)
+(session search). See [`CONTRIBUTING.md`](CONTRIBUTING.md) to get involved.
 
 [okf]: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
 [memgpt]: https://arxiv.org/abs/2310.08560

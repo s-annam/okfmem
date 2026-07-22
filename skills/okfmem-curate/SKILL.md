@@ -15,7 +15,7 @@ origin: user
 > the okfmem P3 consolidation job (`~/okfmem/memory_consolidate.py`, wired to the
 > Claude Code session-end Stop hook) decay-scores every page and gracefully
 > archives stale ones (`projects/<proj>/archive/`, never deleted), regenerating
-> `MEMORY.md`, every session — no hand-running required. See s-annam/tools#19.
+> `MEMORY.md`, every session — no hand-running required. See issue #1.
 > Reach for `/okfmem-curate` only for **judgment-driven** curation the automated
 > decay pass does not do: merging duplicate-with-CLAUDE.md entries, semantic
 > consolidation, or a hard purge the archive gate is too conservative to make.
