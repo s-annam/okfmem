@@ -5,12 +5,33 @@
        alt="okfmem demo — the always-loaded MEMORY.md index, both agent harnesses wired, and okfmem consolidate --dry-run archiving stale pages while keeping the hot and pinned ones">
 </p>
 
+## Quickstart
+
+Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs natively on macOS and Linux. For Windows, run these commands inside **WSL (Windows Subsystem for Linux)** or **Git Bash**.
+
+```bash
+# 1. Clone the engine (this repo)
+git clone https://github.com/s-annam/okfmem.git ~/okfmem
+cd ~/okfmem
+
+# 2. Run the automated installer
+./install.sh
+```
+
+The installer will:
+1. Symlink the `okfmem` CLI to `~/.local/bin/okfmem`.
+2. Create a local git-backed store at `~/okfmem-store` (if it doesn't exist).
+3. Wire the memory system into your AI coding agents (Claude Code, Antigravity, etc.).
+
+Make sure `~/.local/bin` is in your `$PATH`. (e.g., `export PATH="$HOME/.local/bin:$PATH"`).
+
 ## Why okfmem
 
-I didn't set out to build this. For months I ran memgraph as the
-store and kept my own tooling deliberately thin — a set of wrapper skills to save
-memory as I worked and read it back at the start of a new session. The goal was to
-lean on a third-party engine and not maintain my own.
+I didn't set out to build this. I wanted to use an existing memory system, and for
+months I did — I ran one such third-party system as the store, keeping my own tooling
+deliberately thin: a set of wrapper skills to save memory as I worked and read it back
+at the start of a new session. The goal was to lean on a third-party engine and not
+maintain my own.
 
 It worked well, but it was slow, and nothing ever decayed — the automatic
 forgetting layer was a phase I never got working on top of it, so I hand-cleaned
@@ -22,10 +43,10 @@ Claude recovered it with `git merge -s ours` (keep the known-good local tree, no
 force-push). But the complexity had shown itself: the architecture I'd adopted to
 avoid building wasn't buying safety, it *was* the risk.
 
-Even then I tried not to build. I re-surveyed the space (it has genuinely filled
-in — agentmemory, hippo-memory and others now do
-decay well), but every serious one I found is DB/engine-backed with markdown as an
-*export*. I wanted the inverse, so I built the smallest thing that does it.
+Even then I tried not to build. I re-surveyed the space — it has genuinely filled in,
+and the serious options now do decay and consolidation well — but every one I found is
+DB/engine-backed, with markdown as an *export* rather than the source of truth. I wanted
+the inverse, so I built the smallest thing that does it.
 
 **The Problem:** Native agent memory (e.g. Claude Code auto-loading a `MEMORY.md` index) has no lifecycle management. Pages only accumulate, so the index grows into an endless scratchpad and the signal gets buried mid-context ("Lost in the Middle"). DB-backed frameworks fix this with tiered memory, but they lean on their own local databases and stay coupled to their ecosystem — your markdown is only ever an export.
 
@@ -54,30 +75,9 @@ The usual objection is "how is this different from just writing markdown files?"
 |---|---|---|---|---|---|
 | **okfmem** | plain OKF markdown in git | no (session-end hook) | no | yes (Claude Code + Antigravity) | yes (Ebbinghaus, never deletes) |
 | Claude Code native memory | markdown | no | no | no (Claude Code only) | no (grows unbounded) |
-| agentmemory | SQLite / vector | yes | yes | no | yes |
-| hippo-memory | SQLite (markdown = mirror) | yes (daily runner) | yes | partial (hooks both prompts) | yes (half-life + access boost) |
+| DB-backed memory frameworks | SQLite / vector (markdown = export) | typically | yes | varies | yes |
 
 Every DB-backed alternative treats markdown as an export, not the store. okfmem's premise is the inverse: the markdown *is* the store, readable by any agent with `grep`.
-
-## Quickstart
-
-Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs natively on macOS and Linux. For Windows, run these commands inside **WSL (Windows Subsystem for Linux)** or **Git Bash**.
-
-```bash
-# 1. Clone the engine (this repo)
-git clone https://github.com/s-annam/okfmem.git ~/okfmem
-cd ~/okfmem
-
-# 2. Run the automated installer
-./install.sh
-```
-
-The installer will:
-1. Symlink the `okfmem` CLI to `~/.local/bin/okfmem`.
-2. Create a local git-backed store at `~/okfmem-store` (if it doesn't exist).
-3. Wire the memory system into your AI coding agents (Claude Code, Antigravity, etc.).
-
-Make sure `~/.local/bin` is in your `$PATH`. (e.g., `export PATH="$HOME/.local/bin:$PATH"`).
 
 ## How the AI Uses It (Daily Flow)
 
