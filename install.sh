@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -e
 
+# -1. Redirect native-Windows shells to install.ps1 --------------------------
+# This script needs a POSIX-ish environment (symlinks, `uname`, etc.), which
+# WSL and Git Bash both provide even though they run "on Windows". Detect the
+# genuinely-native case (a cmd.exe/PowerShell-launched bash with no WSL/Git
+# Bash underneath) and point at the PowerShell installer instead of limping
+# through with missing primitives. Err toward proceeding here: WSL sets
+# $WSL_DISTRO_NAME (or has "microsoft" in /proc/version) and Git Bash's
+# `uname -s` reports MINGW*/MSYS*/CYGWIN* — both are left alone.
+if [ "${OS:-}" = "Windows_NT" ] && ! command -v uname >/dev/null 2>&1; then
+    echo "Native Windows shell detected (no uname, no WSL/Git Bash)."
+    echo "Please run install.ps1 instead:"
+    echo "   powershell -ExecutionPolicy Bypass -File install.ps1"
+    exit 1
+fi
+if [ "${OS:-}" = "Windows_NT" ] && command -v uname >/dev/null 2>&1; then
+    UNAME_S="$(uname -s 2>/dev/null || true)"
+    IS_WSL=0
+    [ -n "${WSL_DISTRO_NAME:-}" ] && IS_WSL=1
+    grep -qi microsoft /proc/version 2>/dev/null && IS_WSL=1
+    case "$UNAME_S" in
+        MINGW*|MSYS*|CYGWIN*) IS_GITBASH=1 ;;
+        *) IS_GITBASH=0 ;;
+    esac
+    if [ "$IS_WSL" -eq 0 ] && [ "$IS_GITBASH" -eq 0 ]; then
+        echo "Native Windows shell detected (not WSL, not Git Bash)."
+        echo "Please run install.ps1 instead:"
+        echo "   powershell -ExecutionPolicy Bypass -File install.ps1"
+        exit 1
+    fi
+fi
+
 echo "=> Installing okfmem..."
 
 # 0. Check dependencies

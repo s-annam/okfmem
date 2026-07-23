@@ -32,6 +32,8 @@ import json
 import os
 import re
 import shutil
+import stat
+import subprocess
 import sys
 
 # ---------------------------------------------------------------------------
@@ -142,6 +144,27 @@ def detect_harnesses():
 # ---------------------------------------------------------------------------
 # Encoded-dir -> real path (filesystem-probed; dir names may contain '-')
 # ---------------------------------------------------------------------------
+def _windows_drive_root(tokens):
+    """If `tokens` starts with a drive letter and that drive actually exists
+    on this machine, return (root, consumed) so the probe can start from
+    `C:\\` instead of `/`. The first token is either a bare letter `C` (from
+    an encoded `C-Users-name-project`) or a drive spec `C:` — the latter is
+    what Claude Code's encoding produces on Windows, where `str(Path)` uses
+    `\\` separators, so `C:\\Users` -> `C:-Users` -> first token `C:`. Returns
+    None on POSIX or when the first token isn't a real drive letter — the
+    caller then falls back to the original `/`-rooted behavior unchanged."""
+    if os.name != "nt" or not tokens:
+        return None
+    first = tokens[0]
+    letter = first[:-1] if first.endswith(":") else first
+    if len(letter) != 1 or not letter.isalpha():
+        return None
+    drive = f"{letter}:\\"
+    if not os.path.isdir(drive):
+        return None
+    return drive, 1
+
+
 def decode_root(encoded):
     """`-Users-you-worktree-autosync` -> `/Users/you/worktree-autosync`.
 
@@ -149,10 +172,19 @@ def decode_root(encoded):
     directory names can themselves contain '-'. Reverse it by probing the real
     filesystem: walk the '-'-split tokens left to right, greedily preferring the
     longest existing directory at each step.
+
+    On Windows, an encoded path like `C-Users-name-project` (or
+    `-C-Users-name-project`) starts with a drive letter instead of a leading
+    slash; the probe root is switched to `C:\\` for that case (POSIX behavior,
+    including existing encodings like `-Users-you-worktree-autosync`, is
+    unchanged).
     """
     tokens = encoded.lstrip("-").split("-")
     path = "/"
     i = 0
+    drive = _windows_drive_root(tokens)
+    if drive is not None:
+        path, i = drive
     while i < len(tokens):
         # extend the current segment with as many '-'-joined tokens as still
         # name a real directory; fall back to the single token.
@@ -168,10 +200,10 @@ def decode_root(encoded):
                 best, best_j = cand, j
         if best is None:
             # nothing on disk matches — reconstruct verbatim and stop probing
-            return os.path.join(path, "-".join(tokens[i:]))
+            return os.path.normpath(os.path.join(path, "-".join(tokens[i:])))
         path = os.path.join(path, best)
         i = best_j + 1
-    return path
+    return os.path.normpath(path)
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +391,147 @@ def skill_dirs():
     return out
 
 
+def _is_junction(path):
+    """True if `path` is a Windows directory junction / mount-point reparse
+    point. Junctions aren't `os.path.islink`-true on every Python version, so
+    callers that need to tell "a link we made" from "a real directory" must
+    check this too.
+
+    Use `os.lstat` (NOT `os.stat`): a junction is a reparse point, and
+    `os.stat` follows it to the real directory — whose attributes never carry
+    the reparse flag, so it would always report False. `os.lstat` inspects the
+    link itself. Prefer the specific `st_reparse_tag == IO_REPARSE_TAG_MOUNT_
+    POINT` when the running Python exposes it, else fall back to the generic
+    FILE_ATTRIBUTE_REPARSE_POINT bit. All of these attributes are Windows-only
+    and appear only on recent Python, so everything is getattr-guarded and any
+    failure (or POSIX) returns False."""
+    if os.name != "nt":
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    tag = getattr(st, "st_reparse_tag", None)
+    mount_point = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+    if tag is not None and mount_point is not None:
+        return tag == mount_point
+    attrs = getattr(st, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attrs & reparse)
+
+
+# Marker file dropped inside a tier-3 copytree fallback so a later run can
+# recognize the directory as one WE created (and re-copy it when the engine
+# updates) rather than mistaking it for a user's own real directory. Its body
+# records the engine target the copy was made from.
+MANAGED_COPY_MARKER = ".okfmem-managed-copy"
+
+
+def _make_link(target, link):
+    """Point `link` at `target` using the best mechanism this platform/
+    privilege level allows, three tiers deep:
+
+      1. `os.symlink` — works everywhere Claude Code already assumed (POSIX
+         always; Windows when Developer Mode or admin grants the privilege).
+      2. Directory junction via `mklink /J` — Windows-only, needs no
+         elevation, stays live (repoints transparently like a symlink), but
+         only works for directories (fine here — skill dirs are directories).
+      3. One-time `shutil.copytree` — last resort when neither of the above
+         is available; the copy goes stale on engine updates, so it is stamped
+         with a MANAGED_COPY_MARKER and callers warn the user to re-run
+         `okfmem init` after upgrading.
+
+    Returns the tier that succeeded: "symlink", "junction", or "copy".
+    Raises OSError if all three fail (should only happen on a broken/
+    read-only destination).
+    """
+    try:
+        # Skill targets are directories; target_is_directory=True makes the
+        # Windows symlink a DIRECTORY symlink (ignored on POSIX). Without it a
+        # bare os.symlink creates a file symlink to a directory on Windows.
+        os.symlink(target, link, target_is_directory=True)
+        return "symlink"
+    except OSError:
+        if os.name != "nt":
+            raise
+    # Tier 2: junction (Windows only, reached only after symlink failed).
+    # NOTE: passing link/target as separate argv items keeps Python from
+    # word-splitting spaced paths, but `cmd /c mklink` itself does not quote
+    # them internally — a target containing spaces can still trip cmd's own
+    # tokenizer. Skill dirs under ~/.claude live in space-free paths today.
+    try:
+        subprocess.run(["cmd", "/c", "mklink", "/J", link, target],
+                       capture_output=True, text=True, check=True)
+        return "junction"
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    # Tier 3: last-resort copy — always succeeds or raises loudly. Stamp a
+    # marker so a later run treats this as a managed copy (re-copied on engine
+    # update) instead of a user's real directory.
+    shutil.copytree(target, link)
+    try:
+        with open(os.path.join(link, MANAGED_COPY_MARKER), "w",
+                  encoding="utf-8") as f:
+            f.write(target + "\n")
+    except OSError:
+        pass  # marker is best-effort; a copy without it just degrades to
+        # "skip (real file)" on the next run — no crash
+    return "copy"
+
+
+def _managed_copy_target(link):
+    """If `link` is a plain directory this engine created via the tier-3
+    copytree fallback, return the engine target path recorded in its marker
+    file (possibly ""); otherwise None. Presence of the marker — not content
+    equality — is what identifies a managed copy, so a copy that has since
+    diverged from an updated engine is still recognized as ours (and re-copied)
+    instead of being mistaken for a user's real directory."""
+    if os.path.islink(link) or not os.path.isdir(link):
+        return None
+    try:
+        with open(os.path.join(link, MANAGED_COPY_MARKER), "r",
+                  encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _link_matches_target(link, target):
+    """True if `link` already points at (or, for a copy, was made from)
+    `target`. Handles all three `_make_link` tiers so `link_skills` stays
+    idempotent: a real symlink is compared via `readlink`; a junction or a
+    plain directory (possibly a stale one-time copy) is compared via
+    `realpath`, which resolves through junctions and matches copies whose
+    SKILL.md content is identical to the source."""
+    if os.path.islink(link):
+        return os.readlink(link) == target
+    if os.path.isdir(link):
+        if _is_junction(link):
+            return os.path.realpath(link) == os.path.realpath(target)
+        # Plain directory: a managed tier-3 copy (see _managed_copy_target).
+        # Treat "same SKILL.md bytes" as "matches" — an engine update changes
+        # those bytes, which correctly reports a mismatch so the caller
+        # re-copies and warns. (Only reached for managed copies; a user's real
+        # directory has no marker and never gets here.)
+        src_skill = os.path.join(target, "SKILL.md")
+        dst_skill = os.path.join(link, "SKILL.md")
+        try:
+            with open(src_skill, "rb") as a, open(dst_skill, "rb") as b:
+                return a.read() == b.read()
+        except OSError:
+            return False
+    return False
+
+
 def link_skills(dry_run):
-    """Symlink every engine skill (~/okfmem/skills/<name>/SKILL.md) into each
-    detected harness skill dir. Idempotent; never deletes a real (non-symlink)
-    entry. Returns a list of (harness, name, action) tuples for reporting."""
+    """Link every engine skill (~/okfmem/skills/<name>/SKILL.md) into each
+    detected harness skill dir, via `_make_link`'s three-tier fallback
+    (symlink -> junction -> copy) so this works on Windows without admin
+    privileges. Idempotent; never deletes a real (non-symlink, non-junction,
+    non-managed-copy) entry. Returns a list of (harness, name, action) tuples
+    for reporting — action is "ok"/"link"/"repoint" plus a tier suffix for
+    non-symlink mechanisms (e.g. "link (junction)", "link (copy — will go
+    stale; re-run okfmem init after engine updates)")."""
     engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
     actions = []
     if not os.path.isdir(engine):
@@ -375,21 +544,46 @@ def link_skills(dry_run):
         for name in names:
             target = os.path.join(engine, name)
             link = os.path.join(dest, name)
-            if os.path.islink(link):
-                if os.readlink(link) == target:
+            # "Managed" = something we created and may repoint: a symlink, a
+            # junction, or a tier-3 copy identified by its marker (regardless
+            # of whether its contents still match — that's how a stale copy
+            # gets re-copied instead of misfiled as a user's real file).
+            is_managed = (os.path.islink(link) or _is_junction(link)
+                          or _managed_copy_target(link) is not None)
+            if is_managed:
+                if _link_matches_target(link, target):
                     actions.append((harness, name, "ok"))
                     continue
                 action = "repoint"
                 if not dry_run:
-                    os.remove(link)
-                    os.symlink(target, link)
+                    if _is_junction(link):
+                        # A junction is a directory reparse point: unlink it
+                        # with rmdir (removes the link, not the target). rmtree
+                        # on a junction can traverse INTO the target on older
+                        # Python — never do that here.
+                        os.rmdir(link)
+                    elif os.path.isdir(link) and not os.path.islink(link):
+                        shutil.rmtree(link)  # tier-3 real copy dir
+                    else:
+                        os.remove(link)
+                    tier = _make_link(target, link)
+                    if tier == "copy":
+                        action = ("repoint (copy — will go stale; re-run "
+                                  "okfmem init after engine updates)")
+                    elif tier != "symlink":
+                        action = f"repoint ({tier})"
             elif os.path.exists(link):
                 actions.append((harness, name, "skip (real file)"))
                 continue
             else:
                 action = "link"
                 if not dry_run:
-                    os.symlink(target, link)
+                    tier = _make_link(target, link)
+                    if tier == "junction":
+                        action = "link (junction)"
+                    elif tier == "copy":
+                        action = ("link (copy — will go stale; re-run "
+                                  "okfmem init after engine updates)")
             actions.append((harness, name, action))
     return actions
 

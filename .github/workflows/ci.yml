@@ -15,8 +15,18 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  # Matrixed over ubuntu-latest + windows-latest (issue #11 — Windows support).
+  # A matrix reports per-OS check names ("build (ubuntu-latest)",
+  # "build (windows-latest)"), which are unstable required-check targets — the
+  # names change whenever the OS list does. So this job is named `build`, and a
+  # single `verify` gate job below fans them in. Branch protection requires the
+  # stable `verify` name and never needs editing when the matrix changes.
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -27,8 +37,11 @@ jobs:
       # The one unrecoverable gate: the repo is public, so a private string in a
       # tracked file is the failure mode that's expensive to walk back. Runs
       # FIRST so a leak fails fast, before lint/tests. Pure stdlib, no deps.
+      # `python` (not `python3`) is what setup-python guarantees on every OS;
+      # on the Windows runner `python3` may resolve to the Microsoft Store
+      # app-execution alias (or be absent), which would fail this required job.
       - name: Leak gate
-        run: python3 scripts/check-leaks.py
+        run: python scripts/check-leaks.py
 
       - name: Install ruff
         run: pip install ruff
@@ -48,6 +61,7 @@ jobs:
       # pytest only if a suite exists — no tests today, so this no-ops cleanly
       # instead of failing on "no tests collected".
       - name: Tests
+        shell: bash
         run: |
           if [ -d tests ] || git ls-files '*_test.py' 'test_*.py' | grep -q .; then
             pip install pytest
@@ -55,3 +69,15 @@ jobs:
           else
             echo "No test suite found — skipping (tracked as a follow-up)."
           fi
+
+  # Stable required-check gate. Branch protection on `main` requires `verify`;
+  # this job just fans in every matrix leg, so the required-check name stays
+  # constant no matter how the `build` matrix (OS list) changes. `needs`
+  # succeeds only if all `build` legs pass, so `verify` is green iff the whole
+  # matrix is green.
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: All build legs passed
+        run: echo "verify — all build matrix legs green."
