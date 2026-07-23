@@ -74,6 +74,14 @@ MEMORY_DIR="$HOME/.claude/projects/$(echo "$PROJECT_ROOT" | sed 's|:|-|g; s|/|-|
 
 If `$MEMORY_DIR` does not exist or is not a symlink into `~/okfmem-store/projects/`, the project isn't set up yet — tell the user and offer to scaffold (create `~/okfmem-store/projects/<name>/` with a `MEMORY.md` + `STATE.md`, then symlink it into `$MEMORY_DIR`).
 
+**Pull latest before writing anything (#26).** The SessionStart pull hook (#16) only fires at session *start* — if another machine pushed to `~/okfmem-store` *during* this session, the store is stale by the time `/okfmem-save` runs. Bring it current before writing `STATE.md`/pages so this session's capture builds on the latest shared history instead of racing it during the Step 7 sync:
+
+```bash
+okfmem pull   # or: python3 ~/okfmem/okfmem pull   if not on PATH
+```
+
+`okfmem pull` (the fail-open read-side primitive backing #17/#16) fetches and integrates — fast-forward if the store is clean, `rebase --autostash` otherwise — and is a clean no-op when offline, already up to date, or there's no upstream. It never blocks this skill: a non-zero exit means a genuine rebase conflict, which it already aborted (tree left clean); surface that to the user as "the store needs manual conflict resolution before this save's memory pages can be written cleanly" and continue — don't let a pull failure stop STATE.md/page capture, since Step 7's `okfmem sync` will hit the same conflict and report it again if it's still unresolved.
+
 ### Step 1c: Clean up tool-created worktrees and branches
 
 Before any memory write, reclaim the worktrees and branches that tooling left behind this session. `/implement-issue`, `/implement-epic`, `commit-all.sh`, and the worktree isolation used by Stop hooks (fallow audits and friends) all create `<repo>/.claude/worktrees/<slug>/` dirs and local feature branches (`feat/…`, `gh-<N>`, lowercase Linear IDs); after a ff-merge into `main` they are dead weight, and `git worktree remove`'s partial-success failure mode (TCC, Docker pins) leaves orphan dirs behind. The `fallow audit --changed-since` Stop hook also leaves **detached, clean temp worktrees** in `$TMPDIR` (basename `fallow-audit-base-cache-*`) — the sweep now matches those too. Run the sweep:
@@ -155,6 +163,7 @@ Overwrite `$MEMORY_DIR/STATE.md` with the current session's active state. **`STA
 ---
 type: state
 project: <PROJECT_NAME>
+modified: <ISO-8601 UTC timestamp — e.g. 2026-07-23T18:04:00Z>
 ---
 
 # STATE — <PROJECT_NAME>
@@ -178,7 +187,7 @@ project: <PROJECT_NAME>
 <the standing goal>
 ```
 
-Fill each section from the session. Show a draft summary first: `"Session: '<summary>' — save this? (yes / edit)"`. After confirmation, `Write` the file (full overwrite — do not `Edit`/append; the whole file is replaced each session).
+Fill each section from the session. **Stamp `modified:` with the current wall-clock time in ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`), fresh on every save** — `okfmem sync`/`okfmem pull` read this field to auto-resolve cross-machine `STATE.md` conflicts (newer `modified:` wins, last-write-wins), so a stale or missing value silently defers reconciliation to a hand-merge. Show a draft summary first: `"Session: '<summary>' — save this? (yes / edit)"`. After confirmation, `Write` the file (full overwrite — do not `Edit`/append; the whole file is replaced each session).
 
 Keep `## Goal` as the project's standing goal — carry forward the prior value unless the goal shifted this session. Use `(none)` for empty `## Blockers`.
 

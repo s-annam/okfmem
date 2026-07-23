@@ -77,6 +77,12 @@ fi
 # existing store.
 mkdir -p "$STORE_DIR/projects"
 
+# NOTE (#27): a fresh `git init` store also has no `.gitignore` -- that is
+# NOT fixed up here. `memory_init.py --yes` below creates/maintains the
+# store's `.gitignore` (managed block: `.okfmem-sync.lock`, `*.db`,
+# `__pycache__/`, `*.pyc`, `.DS_Store`) as one of its own steps, unconditionally
+# and before this script (or anything else) ever calls `okfmem sync`.
+
 # 3. Wire it up
 echo "=> Running backfill and initialization..."
 python3 "$ENGINE_DIR/memory_backfill.py"

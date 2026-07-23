@@ -12,7 +12,11 @@ Sequence:  fetch  →  no-op if already up to date  →
 
 Fail-open contract (this is the part #16's SessionStart hook depends on):
   - Offline / fetch failure: swallowed. Never raises, never exits non-zero.
-  - Rebase conflict: the half-done rebase is aborted (tree left clean) and
+  - Rebase conflict confined to per-project STATE.md snapshots: auto-resolved
+    (#25) — STATE.md is a whole-file last-write-wins snapshot, so the newer
+    `modified:` frontmatter timestamp wins (tie → the incoming side; a
+    read-side pull is consuming, not saving). Any conflict touching a durable
+    page or MEMORY.md: the half-done rebase is aborted (tree left clean) and
     reported; `okfmem pull` run manually exits 1 so a human notices and
     resolves the store by hand. This is the ONLY non-zero exit case.
   - No upstream configured, or already up to date: clean no-op, exit 0.
@@ -21,7 +25,7 @@ as-is and either ignore its exit code entirely or treat 1 as "needs a human,
 but don't fail the session" — it never hangs and never leaves a half-done
 rebase behind.
 
-Shares its lockfile (`<store>/.okfmem-sync.lock`) and git helpers with
+Shares its lockfile (`<store>/.git/okfmem-sync.lock`, #27) and git helpers with
 memory_sync.py so a concurrent `okfmem sync` and `okfmem pull` on the same
 store serialize instead of racing.
 
@@ -140,18 +144,51 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
 
         rb = _safe_git(store, "pull", "--rebase", "--autostash", timeout=timeout)
         if rb.returncode != 0:
-            _safe_git(store, "rebase", "--abort")
-            res["conflict"] = True
-            res["reason"] = ("pull --rebase conflict — resolve the store by "
-                             "hand; tree left clean (rebase aborted).")
-            return res
+            # #25: a conflict confined to STATE.md snapshots is decided by
+            # the newer `modified:` frontmatter (prefer_local=False — a
+            # read-side pull prefers the incoming snapshot on a tie);
+            # anything touching a durable page or MEMORY.md falls through
+            # to the normal abort so a human reconciles it. Post-fetch the
+            # rebase is local-only, so ms helpers (no _safe_git wrapper)
+            # are fine here.
+            if not ms._finish_rebase_with_state_autoresolve(
+                    store, prefer_local=False):
+                _safe_git(store, "rebase", "--abort")
+                res["conflict"] = True
+                res["reason"] = ("pull --rebase conflict — resolve the store "
+                                 "by hand; tree left clean (rebase aborted).")
+                return res
+        if ms._has_unmerged_paths(store):
+            # The rebase completed (branch moved) but the trailing
+            # autostash-pop conflicted — git exits 0 for that, so it must be
+            # caught here (same latent gap #26 closed in memory_sync). #25:
+            # a STATE.md-only pop conflict is resolved in place (newer
+            # `modified:` wins, incoming on a tie) and the retained
+            # autostash dropped; the mixed reset then unstages the
+            # resolution so surviving local edits sit in the working tree
+            # exactly as a clean autostash-pop would have left them.
+            # Anything else: undo the rebase (ORIG_HEAD) and re-apply the
+            # stash, restoring the original dirty tree for a human.
+            if ms._auto_resolve_state_conflicts(store, prefer_local=False):
+                _safe_git(store, "stash", "drop")
+                _safe_git(store, "reset", "-q")
+            else:
+                _safe_git(store, "reset", "--hard", "ORIG_HEAD")
+                _safe_git(store, "stash", "pop")
+                res["conflict"] = True
+                res["reason"] = ("pull --rebase autostash conflict — resolve "
+                                 "the store by hand; original tree restored "
+                                 "(rebase undone).")
+                return res
         res["pulled"] = True
         res["reason"] = "rebased onto remote."
         return res
-    except OSError as e:
+    except (OSError, subprocess.TimeoutExpired) as e:
         # "Never raises" contract: a lock-acquire or git-region OSError
         # (perm-denied, disk full, ...) must not surface as a SessionStart
-        # traceback. Collapse to a clean fail-open no-op result.
+        # traceback — nor a TimeoutExpired from the unwrapped ms._git calls
+        # the #25 auto-resolve region makes. Collapse to a clean fail-open
+        # no-op result.
         res["pulled"] = False
         res["up_to_date"] = False
         res["conflict"] = False
