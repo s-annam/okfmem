@@ -38,7 +38,11 @@ import sys
 
 
 def check_powershell(path: str) -> int:
-    shell = shutil.which("powershell") or shutil.which("pwsh")
+    # Prefer pwsh (7+) over Windows PowerShell (5.1): the 7 grammar is a
+    # superset, so it won't false-flag 7-only syntax (`??`, ternary `?:`,
+    # null-conditional `?.`) that a script legitimately targeting pwsh 7 uses.
+    # Resolving 5.1 first made every such file fail the parse check spuriously.
+    shell = shutil.which("pwsh") or shutil.which("powershell")
     if not shell:
         return 0  # no PowerShell engine available: silent no-op
 
