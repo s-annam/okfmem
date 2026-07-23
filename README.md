@@ -7,7 +7,7 @@
 
 ## Quickstart
 
-Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs natively on macOS and Linux. For Windows, run these commands inside **WSL (Windows Subsystem for Linux)** or **Git Bash**.
+Requirements: Python 3 (stdlib only — no dependencies) and `git`. Runs natively on macOS, Linux, and Windows.
 
 ```bash
 # 1. Clone the engine (this repo)
@@ -17,6 +17,16 @@ cd ~/okfmem
 # 2. Run the automated installer
 ./install.sh
 ```
+
+**On Windows**, run the native PowerShell installer instead:
+
+```powershell
+git clone https://github.com/s-annam/okfmem.git $env:USERPROFILE\okfmem
+cd $env:USERPROFILE\okfmem
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+(WSL or Git Bash also work fine with `./install.sh` if you prefer a POSIX shell — `install.sh` detects a native `cmd`/PowerShell context and points you at `install.ps1` instead of limping through with missing primitives.)
 
 The installer will:
 1. Symlink the `okfmem` CLI to `~/.local/bin/okfmem`.
@@ -111,6 +121,15 @@ To run consolidation automatically when your agent finishes a session, add this 
   "command": "python3 ~/okfmem/memory_consolidate.py --stdin-hook"
 } ] } ] } }
 ```
+**On Windows**, use `python` (or `py`) and an absolute path — `~` isn't
+expanded the way it is in a POSIX shell — e.g.:
+```json
+{ "hooks": { "Stop": [ { "hooks": [ {
+  "type": "command",
+  "command": "python C:\\Users\\<you>\\okfmem\\memory_consolidate.py --stdin-hook"
+} ] } ] } }
+```
+`install.ps1` prints this snippet with your actual resolved path at the end of installation.
 
 ### 2. Initialization & Wiring (`okfmem init`)
 Scans your system for supported harnesses (Claude Code, Antigravity) and writes a managed `<!-- MEMORY-POINTER v1 -->` block into their global prompts so the AI knows where to find the memory. (The `install.sh` script runs this automatically).

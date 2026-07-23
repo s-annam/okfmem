@@ -69,7 +69,7 @@ If the link points into a git-backed location, surface that to the user as the r
 Run the inventory script:
 
 ```bash
-bash ~/okfmem/skills/okfmem-curate/scripts/inventory.sh "$MEM_DIR"
+python3 ~/okfmem/skills/okfmem-curate/scripts/inventory.py "$MEM_DIR"
 ```
 
 The script emits a markdown report with three sections:
