@@ -35,7 +35,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 # Shared git commit+push path (pull-rebase + lock) lives beside this script.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -124,15 +124,23 @@ def build_alias_index(store):
     return aliases
 
 
-def load_transcript(args):
-    """Resolve transcript text from --transcript, or a Stop-hook JSON on stdin."""
-    path = args.transcript
-    if not path and args.stdin_hook:
-        try:
-            payload = json.loads(sys.stdin.read() or "{}")
-            path = payload.get("transcript_path")
-        except (ValueError, OSError):
-            path = None
+def read_hook_payload(args):
+    """Read the Stop-hook JSON from stdin ONCE (stdin can't be re-read).
+
+    Returns {} when not in --stdin-hook mode (a manual/--transcript run) or on
+    any parse error. Callers pull `transcript_path` / `cwd` out of the result.
+    """
+    if args.transcript or not args.stdin_hook:
+        return {}
+    try:
+        return json.loads(sys.stdin.read() or "{}")
+    except (ValueError, OSError):
+        return {}
+
+
+def load_transcript(args, payload):
+    """Resolve transcript text from --transcript, or the Stop-hook payload."""
+    path = args.transcript or payload.get("transcript_path")
     if not path:
         return None
     path = os.path.expanduser(path)
@@ -141,6 +149,110 @@ def load_transcript(args):
             return f.read()
     except OSError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# statusline save-state badge + session breadcrumb
+# ---------------------------------------------------------------------------
+# A persistent, ambient reminder that beats a per-turn nudge: the Stop hook
+# writes a one-token save-state that the user's statusline renders as an
+# [okfmem:unsaved] / [okfmem:saved] badge (see okfmem-statusline.sh). Both
+# writes are best-effort and NON-fatal — a badge is a convenience, never a
+# gate — and run BEFORE the dirty-tree skip so the badge stays fresh even on a
+# turn where consolidation itself defers. Opt out with OKFMEM_NO_STATUS=1.
+WORK_RE = re.compile(r'"name":\s*"(?:Edit|Write|NotebookEdit)"')
+COMMIT_RE = re.compile(r"git\s+commit\b")
+SAVE_RE = re.compile(r"okfmem[- ]save|okfmem\s+sync\b")
+FILE_PATH_RE = re.compile(r'"file_path":\s*"([^"]+)"')
+
+
+def compute_save_state(transcript):
+    """Classify this session for the badge: 'unsaved' | 'saved' | None.
+
+    'unsaved' — real work (an Edit/Write/NotebookEdit tool use or a git commit)
+    happened with no LATER `/okfmem-save`. 'saved' — a save ran after the last
+    work. None — no work this session (badge cleared). Position-based (last work
+    vs last save) so re-editing after a save flips correctly back to 'unsaved'.
+    Regex over the raw JSONL — same best-effort spirit as access tracking; a
+    missing or garbled transcript just yields None.
+    """
+    if not transcript:
+        return None
+    work_pos = max((m.start() for m in WORK_RE.finditer(transcript)), default=-1)
+    work_pos = max(work_pos,
+                   max((m.start() for m in COMMIT_RE.finditer(transcript)),
+                       default=-1))
+    if work_pos < 0:
+        return None
+    save_pos = max((m.start() for m in SAVE_RE.finditer(transcript)), default=-1)
+    return "saved" if save_pos > work_pos else "unsaved"
+
+
+def status_file_path():
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(base, ".okfmem-status")
+
+
+def write_status_badge(state):
+    """Write the one-token save-state (or clear it). Best-effort, non-fatal.
+
+    Refuses to follow a symlink at the target — a local attacker could otherwise
+    aim it at a sensitive file; the reader (okfmem-statusline.sh) is hardened the
+    same way. No Claude Code config dir -> nothing to badge, skip silently."""
+    path = status_file_path()
+    try:
+        if os.path.islink(path):
+            return
+        if state is None:
+            if os.path.isfile(path):
+                os.remove(path)
+            return
+        if not os.path.isdir(os.path.dirname(path)):
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(state + "\n")
+    except OSError:
+        pass
+
+
+def write_breadcrumb(store, cwd, transcript, today):
+    """Write a git-ignored single-session trail so a forgotten `/okfmem-save`
+    still leaves a same-machine record. Overwritten each turn (single-session
+    snapshot, like STATE.md); never committed (store `.gitignore` covers
+    `.session-trail.md`). Best-effort, non-fatal."""
+    path = os.path.join(store, ".session-trail.md")
+    try:
+        if os.path.islink(path):
+            return
+        touched = sorted(set(FILE_PATH_RE.findall(transcript or "")))
+        lines = [f"# okfmem session trail — {today.isoformat()}", ""]
+        if cwd:
+            lines.append(f"- cwd: {cwd}")
+        if touched:
+            lines.append(f"- files touched ({len(touched)}):")
+            lines += [f"    - {p}" for p in touched[:40]]
+            if len(touched) > 40:
+                lines.append(f"    - … +{len(touched) - 40} more")
+        else:
+            lines.append("- files touched: none detected")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def update_statusline(args, store, today):
+    """Compute + write the badge and breadcrumb, then return the transcript text
+    for the caller to reuse (stdin is consumed exactly once, here). Writes are
+    skipped under --dry-run ("writes nothing") and OKFMEM_NO_STATUS=1; the
+    transcript is still loaded either way so the plan/summary stays accurate."""
+    payload = read_hook_payload(args)
+    transcript = load_transcript(args, payload)
+    opted_out = os.environ.get("OKFMEM_NO_STATUS", "").lower() in ("1", "true", "yes")
+    if not args.dry_run and not opted_out:
+        write_status_badge(compute_save_state(transcript))
+        write_breadcrumb(store, payload.get("cwd"), transcript, today)
+    return transcript
 
 
 def page_touched(transcript, real_path, alias_dirs, proj_dir):
@@ -389,6 +501,10 @@ def main():
         print(f"error: bad --today {args.today!r}", file=sys.stderr)
         sys.exit(2)
 
+    # Statusline badge + breadcrumb first: reads stdin (once), and must run even
+    # on a dirty tree where consolidation below defers, so the badge stays fresh.
+    transcript = update_statusline(args, store, today)
+
     if not args.dry_run and not args.no_commit and not args.force:
         if not git_clean(store):
             # Consolidation is idempotent background maintenance; a dirty tree
@@ -407,7 +523,6 @@ def main():
             sys.exit(3)
 
     epoch = resolve_epoch(store, today, args.dry_run)
-    transcript = load_transcript(args)
     alias_index = build_alias_index(store)
 
     projects = sorted(d for d in os.listdir(proj_root)

@@ -180,6 +180,19 @@ expanded the way it is in a POSIX shell — e.g.:
 ```
 `install.ps1` prints this snippet with your actual resolved path at the end of installation.
 
+**Statusline save-state badge (optional):**
+The same Stop hook writes a one-token save-state to `${CLAUDE_CONFIG_DIR:-~/.claude}/.okfmem-status` each turn, so your statusline can show an ambient reminder instead of relying on you to remember `/okfmem-save`:
+
+*   `okfmem*` (amber, trailing `*`) — you did work this session (an edit, a commit) that isn't captured yet. Glance at it before you `/clear`. The `*` mirrors git's dirty marker.
+*   `okfmem` (green, no `*`) — captured this session.
+*   *(nothing)* — no work to capture, or opted out.
+
+**The installer offers to wire it** (`[y/N]`), or run it anytime:
+```bash
+okfmem init --wire-statusline
+```
+It sets your Claude Code `statusLine` to the badge **only when you have none** — an existing/custom statusline is never clobbered; instead it prints a guarded compose snippet to paste in (mirrors how a caveman-style badge is delegated). The badge scripts (`okfmem-statusline.sh`, and `okfmem-statusline.ps1` for PowerShell) are keystroke-cheap (one small file read, no `git`/`python`) and refuse a symlinked flag. The hook also drops a git-ignored `.session-trail.md` in the store (cwd + files touched) so a *forgotten* save still leaves a same-machine trail. Opt the whole thing out with `OKFMEM_NO_STATUS=1`.
+
 ### 2. Initialization & Wiring (`okfmem init`)
 Scans your system for supported harnesses (Claude Code, Antigravity) and writes a managed `<!-- MEMORY-POINTER v1 -->` block into their global prompts so the AI knows where to find the memory. (The `install.sh` script runs this automatically).
 

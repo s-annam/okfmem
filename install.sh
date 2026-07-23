@@ -222,6 +222,39 @@ setup_store_remote() {
 # the manual hint.
 setup_store_remote "$STORE_DIR" || true
 
+# 5. Optional: okfmem save-state badge in the Claude Code statusline. Outward
+# (writes settings.json), so gated on an explicit yes and an interactive
+# terminal (skip cleanly when piped). memory_init.py sets it only when no
+# statusline exists, and prints a compose snippet if you already have one.
+offer_statusline_badge() {
+    [ -t 0 ] || return 0
+    # Probe the CURRENT statusline first (read-only) so the prompt tells the
+    # truth about what pressing Y does in THIS user's case: a fresh setup gets
+    # the badge set automatically, but a user who already has a custom
+    # statusline gets a compose snippet to paste -- wiring never clobbers it.
+    # A blank/unknown probe (older engine, no python) falls back to the generic
+    # prompt.
+    local state
+    state="$( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --statusline-state 2>/dev/null )"
+    case "$state" in
+        okfmem)
+            echo "=> okfmem save-state badge already in your statusline."
+            return 0 ;;
+        no-claude)
+            return 0 ;;  # no ~/.claude yet -- nothing to wire against
+        custom)
+            printf "You already have a Claude Code statusline. Print a snippet to add the okfmem save-state badge to it? [y/N] " ;;
+        *)
+            printf "Show an okfmem save-state badge in your Claude Code statusline? [y/N] " ;;
+    esac
+    read -r ans
+    case "$ans" in
+        [Yy]*) ( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --wire-statusline ) ;;
+        *) echo "   Skipped. Add it later with:  okfmem init --wire-statusline" ;;
+    esac
+}
+offer_statusline_badge || true
+
 echo ""
 echo "✅ okfmem installation complete!"
 echo ""
