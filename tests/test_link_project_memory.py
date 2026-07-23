@@ -183,6 +183,65 @@ def test_skips_nonempty_real_directory(env):
     assert os.path.isfile(os.path.join(link, "some-real-page.md"))
 
 
+def _make_managed_copy(link, marker_target, page="page.md"):
+    """Fabricate a tier-3 managed copy at `link`: a real dir with our marker
+    (recording `marker_target`) plus a content file."""
+    os.makedirs(link)
+    with open(os.path.join(link, mi.MANAGED_COPY_MARKER), "w",
+              encoding="utf-8") as f:
+        f.write(marker_target + "\n")
+    with open(os.path.join(link, page), "w", encoding="utf-8") as f:
+        f.write("copied page")
+
+
+def test_managed_copy_recognized_as_ok_when_target_matches(env):
+    # The #20 bug: a tier-3 copy is a non-empty real dir, so the old code hit
+    # "non-empty directory ... resolve by hand" instead of recognizing our own
+    # copy. It must now report a clean idempotent "ok".
+    link = _link_path(env)
+    target = os.path.realpath(os.path.join(env["store"], "projects", "myproj"))
+    _make_managed_copy(link, target)
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=False)
+    assert status == "ok"
+    assert "copy" in msg
+    # Left untouched -- no churn on the idempotent path.
+    assert os.path.isfile(os.path.join(link, "page.md"))
+
+
+def test_managed_copy_repointed_when_target_differs(env):
+    # Copy whose recorded target is a DIFFERENT (renamed/old) project -> repoint.
+    link = _link_path(env)
+    _make_managed_copy(link, str(env["root"].parent), page="stale.md")
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=False)
+    assert status == "changed"
+    assert "repointed" in msg
+    # The stale copy was torn down and re-linked (proof the rmtree+relink ran,
+    # regardless of which tier _make_link landed on).
+    assert not os.path.exists(os.path.join(link, "stale.md"))
+    if os.path.islink(link) or mi._is_junction(link):
+        assert os.path.realpath(link) == os.path.realpath(
+            os.path.join(env["store"], "projects", "myproj"))
+
+
+def test_managed_copy_dry_run_reports_without_touching(env):
+    link = _link_path(env)
+    _make_managed_copy(link, str(env["root"].parent), page="stale.md")
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=True)
+    assert status == "changed"
+    assert "would repoint" in msg
+    # Nothing mutated under dry-run.
+    assert os.path.isfile(os.path.join(link, "stale.md"))
+
+
 def test_honors_registry_override_for_project_name(tmp_path, monkeypatch):
     store = tmp_path / "store"
     (store / "projects" / "renamed").mkdir(parents=True)

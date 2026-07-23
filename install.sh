@@ -80,7 +80,13 @@ mkdir -p "$STORE_DIR/projects"
 # 3. Wire it up
 echo "=> Running backfill and initialization..."
 python3 "$ENGINE_DIR/memory_backfill.py"
-python3 "$ENGINE_DIR/memory_init.py"
+# init resolves the CURRENT repo for its memory link from the process cwd
+# (git rev-parse), so run it FROM the engine clone -- a piped `curl | bash`
+# install launched from ~ would otherwise see no git repo and skip the link.
+# --yes: running this installer is the user's consent to wire hooks + create
+# the skill/memory links, so init applies them without prompting (the outward
+# GitHub-remote step below stays gated separately).
+( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --yes )
 
 # 4. Optional: private GitHub remote for the store
 # Both linking an existing repo and creating a new one are outward-facing, so we
