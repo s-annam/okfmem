@@ -99,7 +99,7 @@ Write-Host "   settings.json) using the snippet below — note the absolute path
 Write-Host "   and no '~' (PowerShell/cmd don't expand it the way a POSIX shell does):"
 Write-Host ""
 
-$ConsolidatePy = (Join-Path $EngineDir "memory_consolidate.py").Replace('\', '\\')
+$ConsolidatePy = (Join-Path $EngineDir "memory_consolidate.py").Replace("\", "\\")
 $HookJson = @"
 { "hooks": { "Stop": [ { "hooks": [ {
   "type": "command",
