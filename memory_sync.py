@@ -7,7 +7,12 @@ exactly one place instead of being duplicated (and drifting) between them:
   - `memory_consolidate.py` (P3 Stop-hook job) imports `sync_store` in-process.
   - the `/okfmem-save` skill shells `okfmem sync -m "<summary>"`.
 
-Sequence:  add -A  →  (if staged) pull --rebase  →  commit  →  push
+Sequence:  add -A  →  commit (if staged)  →  pull --rebase  →  push
+
+`pull --rebase` runs whenever `do_pull` is set, regardless of whether there
+was anything local to commit — a read-only machine with nothing staged still
+needs `okfmem sync` to bring in remote changes (see `memory_pull.py` / #17 for
+the standalone `okfmem pull` primitive this pairs with).
 
 Guards:
   - A lockfile (`<store>/.okfmem-sync.lock`) serializes concurrent windows so
@@ -170,23 +175,28 @@ def sync_store(store, message, do_push=True, do_pull=True):
     try:
         _git(store, "add", "-A")
         staged = _git(store, "diff", "--cached", "--quiet")
-        if staged.returncode == 0:
-            res["reason"] = "no changes to commit."
-            return res
+        has_changes = staged.returncode != 0
 
-        c = _git(store, "commit", "-m", message)
-        if c.returncode != 0:
-            res["reason"] = (c.stdout.strip() or c.stderr.strip()
-                             or "commit failed.")
-            return res
-        res["committed"] = True
-        sha = _git(store, "rev-parse", "--short", "HEAD")
-        res["sha"] = sha.stdout.strip() if sha.returncode == 0 else None
-        res["reason"] = f"committed {res['sha']}: {message}"
+        if has_changes:
+            c = _git(store, "commit", "-m", message)
+            if c.returncode != 0:
+                res["reason"] = (c.stdout.strip() or c.stderr.strip()
+                                 or "commit failed.")
+                return res
+            res["committed"] = True
+            sha = _git(store, "rev-parse", "--short", "HEAD")
+            res["sha"] = sha.stdout.strip() if sha.returncode == 0 else None
+            res["reason"] = f"committed {res['sha']}: {message}"
+        else:
+            res["reason"] = "no changes to commit."
 
         if not do_push:
             return res
 
+        # Pull regardless of has_changes: a read-only session (nothing staged)
+        # still needs remote commits integrated. The tree is clean here either
+        # way (add -A above already folded any working-tree diff into the
+        # index/commit), so a plain --rebase is safe without --autostash.
         if do_pull:
             pr = _git(store, "pull", "--rebase")
             if pr.returncode != 0:
@@ -195,6 +205,11 @@ def sync_store(store, message, do_push=True, do_pull=True):
                 res["reason"] = ("pull --rebase conflict — resolve "
                                  "~/okfmem-store by hand; NOT pushed.")
                 return res
+
+        if not has_changes:
+            # Nothing local to push; the pull above already brought us
+            # current. Avoid a no-op `git push` round-trip.
+            return res
 
         p = _git(store, "push")
         if p.returncode == 0:

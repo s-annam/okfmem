@@ -6,6 +6,7 @@ Usage:
   okfmem init        [--dry-run] [--status] ...  # P2: pointers + registry
   okfmem consolidate [--dry-run] ...             # P3: decay + archive + push
   okfmem sync        -m "<msg>" [--no-push] ...  # commit + pull-rebase + push
+  okfmem pull        [--quiet] [--store PATH]    # read-side sync: fetch + integrate, no commit needed
   okfmem update      [--check] [--store PATH]    # git pull the engine + re-run init
   okfmem status                                  # alias for `init --status`
 
@@ -25,7 +26,7 @@ import sys
 HERE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlink -> real engine dir
 MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "consolidate": "memory_consolidate.py", "sync": "memory_sync.py",
-           "update": "memory_update.py"}
+           "pull": "memory_pull.py", "update": "memory_update.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
 PLUGINS = {"index": "memory_search.py", "search": "memory_search.py"}
