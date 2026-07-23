@@ -32,8 +32,26 @@ The installer will:
 1. Symlink the `okfmem` CLI to `~/.local/bin/okfmem`.
 2. Create a local git-backed store at `~/okfmem-store` (if it doesn't exist).
 3. Wire the memory system into your AI coding agents (Claude Code, Antigravity, etc.).
+4. Optionally link a private GitHub remote for the store. If you already have an
+   `okfmem-store` repo (a returning user, or a second machine), it offers to link
+   and **pull it down**; otherwise it offers to create one. Skip it to stay
+   local-only — you can add a remote later with `git -C ~/okfmem-store remote add origin <url>`.
 
 Make sure `~/.local/bin` is in your `$PATH`. (e.g., `export PATH="$HOME/.local/bin:$PATH"`).
+
+### Updating
+
+The engine is a git clone, so updating it is one command — same on every OS:
+
+```bash
+okfmem update          # git pull --ff-only the engine, then re-run init
+okfmem update --check  # report whether a newer version exists; change nothing
+```
+
+`okfmem status` also prints a passive nudge when your clone is behind (checked at
+most once a day, and never over a pipe or from the Stop hook). Updates are
+fast-forward only: if you've made local engine commits that diverge from origin,
+the pull refuses rather than clobbering them — stash or branch first.
 
 ## Why okfmem
 

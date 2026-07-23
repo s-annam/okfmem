@@ -35,6 +35,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 # ---------------------------------------------------------------------------
 # Output formatting — TTY-gated color + status glyphs, ASCII-safe when piped
@@ -243,21 +244,102 @@ def _registry_shell(mapping, overrides):
     }
 
 
-def write_registry(store, reg, dry_run):
-    """Write registry.json only when its content actually changes. Returns
-    (path, changed) so the caller can report accurately and avoid needless
-    writes on a re-run of an already-wired setup."""
-    path = os.path.join(store, "registry.json")
-    text = json.dumps(reg, indent=2) + "\n"
-    old = ""
-    if os.path.exists(path):
+def _load_registry(path):
+    """Read an existing registry.json, tolerating absence or corruption.
+    Always returns a dict with at least 'map' and 'overrides' keys."""
+    if not os.path.exists(path):
+        return {"map": {}, "overrides": {}}
+    try:
         with open(path, "r", encoding="utf-8") as f:
-            old = f.read()
-    changed = old != text
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("registry.json is not a JSON object")
+        data.setdefault("map", {})
+        data.setdefault("overrides", {})
+        return data
+    except (json.JSONDecodeError, ValueError, OSError):
+        # A malformed registry shouldn't wedge init -- treat as empty and let
+        # the merge rebuild from local symlinks + whatever we can preserve.
+        return {"map": {}, "overrides": {}}
+
+
+def _is_foreign_root(root):
+    """True if `root` is an absolute path in ANOTHER OS's native form -- i.e. it
+    belongs to a different machine sharing this store.
+
+    Decided by path SHAPE, never by os.path.isdir: on Windows a bare POSIX path
+    like `/Users/you/proj` is drive-*relative* and isdir() happily resolves it
+    to `C:\\Users\\you\\proj`, so a dir check would misjudge another machine's
+    mac paths as local and drop them. A native Windows root instead carries a
+    drive (`C:\\`) or UNC (`\\\\host`); a native POSIX root starts with `/` and
+    has no backslashes."""
+    drive, _ = os.path.splitdrive(root)
+    if os.name == "nt":
+        # Native here == a drive (C:\) or a UNC share (\\host\...). splitdrive
+        # catches the drive form; check the UNC prefix explicitly since it isn't
+        # always split out. Anything else (a bare /Users/... POSIX path) is a
+        # different machine's.
+        return not (drive or root[:2] in ("\\\\", "//"))
+    # POSIX: native == starts with '/' and no Windows drive/backslashes.
+    return bool(drive) or "\\" in root or not root.startswith("/")
+
+
+def _merge_registry(existing, derived):
+    """Merge the locally-derived registry onto an existing one WITHOUT clobbering
+    entries that belong to other machines.
+
+    The store is shared across machines via git, but registry keys are ABSOLUTE
+    git-root paths -- inherently machine-specific. This machine is authoritative
+    only for roots in THIS OS's native path form; foreign roots (e.g. a mac's
+    `/Users/you/...` seen from Windows) are carried through untouched so running
+    init on one machine no longer wipes another machine's mappings to empty.
+
+    Within local scope this run stays authoritative: a native root that is no
+    longer symlinked gets dropped, exactly as the old rebuild-from-scratch did."""
+    def merge_section(key):
+        out = {}
+        # Preserve foreign entries -- another machine's native paths.
+        for root, proj in existing.get(key, {}).items():
+            if _is_foreign_root(root):
+                out[root] = proj
+        # Local entries: this run's derived set is the source of truth.
+        for root, proj in derived.get(key, {}).items():
+            out[root] = proj
+        return dict(sorted(out.items()))
+
+    return {
+        "version": 1,
+        "default_rule": "basename(git-root)",
+        "map": merge_section("map"),
+        "overrides": merge_section("overrides"),
+    }
+
+
+def write_registry(store, reg, dry_run):
+    """Merge the locally-derived registry `reg` onto the existing registry.json
+    (preserving other machines' entries) and write only when the MAPPING itself
+    changes. Returns (path, changed, merged) so the caller reports the merged
+    counts and avoids needless writes.
+
+    The change check is SEMANTIC (compare the map/overrides dicts), not a byte
+    compare of the serialized JSON. Dict equality ignores key order, so a store
+    file written by an older or differently-formatted engine -- insertion order
+    instead of sorted, or missing the trailing newline -- does NOT count as a
+    change. Without this, every init on a second machine would rewrite the file
+    purely to reformat it and produce a spurious, perpetual cross-platform diff.
+    A real mapping change still rewrites, and rewrites in the normalized form."""
+    path = os.path.join(store, "registry.json")
+    existing = _load_registry(path)
+    merged = _merge_registry(existing, reg)
+    same = (existing.get("map", {}) == merged["map"]
+            and existing.get("overrides", {}) == merged["overrides"])
+    # A missing file must be created even when the mapping is empty (bootstrap);
+    # otherwise only a genuine mapping change triggers a (normalized) write.
+    changed = (not os.path.exists(path)) or (not same)
     if changed and not dry_run:
         with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
-    return path, changed
+            f.write(json.dumps(merged, indent=2) + "\n")
+    return path, changed, merged
 
 
 # ---------------------------------------------------------------------------
@@ -382,10 +464,17 @@ def skill_dirs():
     back-compat alias names primer/memory-curate from ~/tools/skills)."""
     home = os.path.expanduser("~")
     out = {}
+    # Claude Code: ~/.claude is its home dir (settings.json, CLAUDE.md live
+    # there), a strong "installed" signal on its own.
     if os.path.isdir(os.path.join(home, ".claude")):
         out["claude_code"] = os.path.join(home, ".claude", "skills")
-    if os.path.isdir(os.path.join(home, ".codex")):
+    # Codex: require the `codex` binary on PATH. A bare ~/.codex can linger after
+    # an uninstall (or be created by another tool) holding nothing but a skills/
+    # dir -- the dir alone is too weak a signal, and gating on it links skills
+    # for an app that isn't actually present.
+    if shutil.which("codex"):
         out["codex"] = os.path.join(home, ".codex", "skills")
+    # Antigravity: its ~/.gemini home dir OR the `agy` binary on PATH.
     if os.path.isdir(os.path.join(home, ".gemini")) or shutil.which("agy"):
         out["antigravity"] = os.path.join(home, ".gemini", "config", "skills")
     return out
@@ -504,10 +593,17 @@ def _link_matches_target(link, target):
     `realpath`, which resolves through junctions and matches copies whose
     SKILL.md content is identical to the source."""
     if os.path.islink(link):
-        return os.readlink(link) == target
+        # Compare RESOLVED targets, not the raw readlink string. On Windows
+        # os.readlink returns an extended-length "\\?\C:\..." path that never
+        # string-equals the plain target, which would repoint every single run.
+        # realpath + normcase is correct on both platforms (and case-insensitive
+        # on Windows).
+        return os.path.normcase(os.path.realpath(link)) == \
+            os.path.normcase(os.path.realpath(target))
     if os.path.isdir(link):
         if _is_junction(link):
-            return os.path.realpath(link) == os.path.realpath(target)
+            return os.path.normcase(os.path.realpath(link)) == \
+                os.path.normcase(os.path.realpath(target))
         # Plain directory: a managed tier-3 copy (see _managed_copy_target).
         # Treat "same SKILL.md bytes" as "matches" — an engine update changes
         # those bytes, which correctly reports a mismatch so the caller
@@ -588,7 +684,69 @@ def link_skills(dry_run):
     return actions
 
 
-def cmd_run(store, dry_run, apply_cleanup, verbose=False):
+def wire_stop_hook(dry_run):
+    """Idempotently wire okfmem's consolidation Stop hook into Claude Code's
+    ~/.claude/settings.json so a fresh install needs no manual JSON paste.
+
+    Returns (action, path):
+      'added'      — appended our Stop hook (a one-time .okfmem.bak is written)
+      'present'    — a Stop hook already runs memory_consolidate.py; left as-is
+      'no-claude'  — ~/.claude missing; nothing to wire (other harnesses differ)
+      'skip (...)' — settings.json unreadable/wrong shape; print the snippet
+
+    Only Claude Code is auto-wired (its settings.json schema is known). Every
+    existing setting and other hook is preserved — we append to hooks.Stop only
+    when no entry there already invokes memory_consolidate.py.
+    """
+    home = os.path.expanduser("~")
+    claude_dir = os.path.join(home, ".claude")
+    if not os.path.isdir(claude_dir):
+        return ("no-claude", None)
+    settings = os.path.join(claude_dir, "settings.json")
+    engine = os.path.dirname(os.path.realpath(__file__))
+    consolidate = os.path.join(engine, "memory_consolidate.py")
+    # Absolute interpreter + script: robust at hook time regardless of PATH.
+    command = f'"{sys.executable}" "{consolidate}" --stdin-hook'
+
+    data = {}
+    if os.path.exists(settings):
+        try:
+            with open(settings, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return ("skip (settings.json unreadable — wire manually)", settings)
+    if not isinstance(data, dict):
+        return ("skip (settings.json not an object — wire manually)", settings)
+
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return ("skip (hooks not an object — wire manually)", settings)
+    stop = hooks.setdefault("Stop", [])
+    if not isinstance(stop, list):
+        return ("skip (Stop hook not a list — wire manually)", settings)
+
+    for group in stop:
+        if not isinstance(group, dict):
+            continue
+        for h in group.get("hooks", []):
+            if isinstance(h, dict) and "memory_consolidate.py" in h.get("command", ""):
+                return ("present", settings)
+
+    stop.append({"hooks": [{"type": "command", "command": command}]})
+    if not dry_run:
+        os.makedirs(claude_dir, exist_ok=True)
+        if os.path.exists(settings):
+            try:
+                shutil.copy2(settings, settings + ".okfmem.bak")
+            except OSError:
+                pass  # backup is best-effort; the write below is the real work
+        with open(settings, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    return ("added", settings)
+
+
+def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
     """Wire the store into every harness and report the result.
 
     Output is quiet-by-default: each of the five steps prints ONE status line
@@ -617,17 +775,20 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False):
 
     # --- 2. registry -------------------------------------------------------
     reg, drift = build_registry(store, claude_projects)
-    reg_path, reg_changed = write_registry(store, reg, dry_run)
+    reg_path, reg_changed, merged = write_registry(store, reg, dry_run)
     changes += 1 if reg_changed else 0
-    detail = f"{len(reg['map'])} projects" + (
-        f", {len(reg['overrides'])} renamed" if reg["overrides"] else "")
+    # Report the MERGED registry (what's actually on disk), not just this
+    # machine's locally-derived slice -- otherwise a machine with no local
+    # symlinks would misleadingly report "0 projects" for a full store.
+    detail = f"{len(merged['map'])} projects" + (
+        f", {len(merged['overrides'])} renamed" if merged["overrides"] else "")
     if reg_changed:
         print(f"{glyph('chg')} registry    "
               f"{'would update' if dry_run else 'updated'} ({detail})")
     else:
         print(f"{glyph('ok')} registry    up to date ({detail})")
-    if verbose and reg["overrides"]:
-        for root, proj in reg["overrides"].items():
+    if verbose and merged["overrides"]:
+        for root, proj in merged["overrides"].items():
             print(f"    {_short(root)} → {proj}")
     for d in drift:
         print(f"    {glyph('warn')} {d}")
@@ -702,14 +863,35 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False):
         chg = [a for a in sk if a[2] != "ok"]
         changes += len(chg)
         n_ok = len(sk) - len(chg)
+        # The label column already says "skills", so the value doesn't repeat it.
+        # A bare count ("9") is opaque and the skills-x-harnesses math means
+        # nothing to the user -- lead with the outcome and NAME the harnesses.
+        hnames = ", ".join(sorted({a[0] for a in sk}))
         if chg:
             print(f"{glyph('chg')} skills      "
-                  f"{len(chg)} to link ({n_ok} already linked)")
+                  f"{len(chg)} to link into {hnames} ({n_ok} already linked)")
         else:
-            print(f"{glyph('ok')} skills      all linked ({n_ok})")
+            print(f"{glyph('ok')} skills      all linked into {hnames}")
         if verbose or chg:
             for harness, name, action in chg:
                 print(f"    {glyph('chg')} {harness:12} {action:16} {name}")
+
+    # --- 6. Stop hook (Claude Code, auto-wired) ---------------------------
+    if wire_hook:
+        haction, hpath = wire_stop_hook(dry_run)
+        if haction == "added":
+            changes += 1
+            verb = "would wire" if dry_run else "wired"
+            print(f"{glyph('chg')} stop hook   {verb} consolidation hook "
+                  f"({_short(hpath)})")
+        elif haction == "present":
+            print(f"{glyph('ok')} stop hook   already wired ({_short(hpath)})")
+        elif haction == "no-claude":
+            print(f"{glyph('ok')} stop hook   no Claude Code dir — skipped")
+        else:
+            print(f"{glyph('warn')} stop hook   {haction}")
+    else:
+        print(f"{glyph('ok')} stop hook   skipped (--no-hook)")
 
     # --- verdict -----------------------------------------------------------
     print()
@@ -721,6 +903,72 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False):
         print(f"{glyph('chg')} {_c(f'{changes} item(s) {verb}', 'bold')}  {tail}")
         if dry_run:
             print(_c("    re-run without --dry-run to apply", "dim"))
+
+
+# ---------------------------------------------------------------------------
+# Update nudge — passive "engine update available" hint on interactive status
+# ---------------------------------------------------------------------------
+def _update_cache_path():
+    """A cache file OUTSIDE both git repos. Writing into the engine or store
+    clone would dirty its tree and break `okfmem update --ff-only`."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "okfmem", "update-check")
+
+
+def _git_engine(*args, timeout=None):
+    engine = os.path.dirname(os.path.realpath(__file__))
+    return subprocess.run(["git", "-C", engine, *args],
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def update_nudge():
+    """Return a one-line 'update available' hint, or None.
+
+    Interactive (TTY) only, so pipes and the consolidation Stop hook never touch
+    the network. Fetches at most once per day (a date stamp cached outside both
+    git repos), and the stamp is written BEFORE the fetch so an offline machine
+    tries once and then reads local refs for the rest of the day rather than
+    hanging on every status. Silent on any failure — not a clone, no upstream,
+    offline, git missing.
+    """
+    if not sys.stdout.isatty():
+        return None
+    try:
+        r = _git_engine("rev-parse", "--is-inside-work-tree")
+        if r.returncode != 0 or r.stdout.strip() != "true":
+            return None
+        up = _git_engine("rev-parse", "--abbrev-ref",
+                         "--symbolic-full-name", "@{u}")
+        if up.returncode != 0:
+            return None
+        upstream = up.stdout.strip()
+
+        today = time.strftime("%Y-%m-%d", time.localtime())
+        cache = _update_cache_path()
+        last = ""
+        if os.path.exists(cache):
+            with open(cache, "r", encoding="utf-8") as f:
+                last = f.read().strip()
+        if last != today:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            with open(cache, "w", encoding="utf-8") as f:
+                f.write(today)  # stamp first: one attempt/day even when offline
+            try:
+                _git_engine("fetch", "--quiet", timeout=5)
+            except Exception:
+                pass  # offline / slow remote — fall back to local refs
+
+        behind = _git_engine("rev-list", "--count",
+                             f"HEAD..{upstream}").stdout.strip()
+        if behind and behind != "0":
+            return (f"{behind} engine update(s) available on {upstream} — "
+                    f"run `okfmem update`")
+    except Exception:
+        return None
+    return None
 
 
 def cmd_status(store):
@@ -768,6 +1016,27 @@ def cmd_status(store):
             note += f"  ({len(pending)} not linked — run `okfmem init`)"
         print(note)
 
+    # Stop hook (Claude Code)
+    settings = os.path.join(home, ".claude", "settings.json")
+    hook = "not wired — run `okfmem init`"
+    if os.path.exists(settings):
+        try:
+            with open(settings, "r", encoding="utf-8") as f:
+                sdata = json.load(f)
+            stop = (sdata.get("hooks", {}) or {}).get("Stop", []) or []
+            if any(isinstance(h, dict)
+                   and "memory_consolidate.py" in h.get("command", "")
+                   for g in stop if isinstance(g, dict)
+                   for h in g.get("hooks", [])):
+                hook = "wired"
+        except (OSError, ValueError):
+            hook = "settings.json unreadable"
+    print(f"  stop hook: {hook}")
+
+    nudge = update_nudge()
+    if nudge:
+        print(f"\n  {glyph('chg')} {nudge}")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -781,6 +1050,9 @@ def main():
     ap.add_argument("--apply-cleanup", action="store_true",
                     help="rewrite claude-memory->okfmem-store on path lines "
                          "(retirement-notice + review lines left untouched)")
+    ap.add_argument("--no-hook", action="store_true",
+                    help="do not auto-wire the Claude Code consolidation Stop "
+                         "hook into ~/.claude/settings.json")
     ap.add_argument("--store", default=os.environ.get(
         "OKFMEM_STORE", os.path.expanduser("~/okfmem-store")))
     args = ap.parse_args()
@@ -793,7 +1065,8 @@ def main():
     if args.status:
         cmd_status(store)
     else:
-        cmd_run(store, args.dry_run, args.apply_cleanup, args.verbose)
+        cmd_run(store, args.dry_run, args.apply_cleanup, args.verbose,
+                wire_hook=not args.no_hook)
 
 
 if __name__ == "__main__":
