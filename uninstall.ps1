@@ -42,6 +42,19 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
 # and hang; IsInputRedirected catches that and takes the documented skip.
 $Interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
 
+# Guard against Unix-style double-dash flags. A user coming from uninstall.sh
+# may type `--dry-run`; PowerShell binds that unrecognized token to the
+# positional -Store param, silently leaving -DryRun unset -- so the script
+# would run FOR REAL while the user believed it was previewing. A real store
+# path never starts with a dash, so treat a dash-prefixed -Store as a typo and
+# fail fast BEFORE removing anything.
+if ($Store -like '-*') {
+    Write-Host "Error: '$Store' is not a valid value for -Store."
+    Write-Host "  This is PowerShell -- flags take a SINGLE dash: -DryRun (not --dry-run)."
+    Write-Host "  Usage:  .\uninstall.ps1 [-DryRun] [-Store <path>]"
+    exit 2
+}
+
 Write-Host "=> Uninstalling okfmem..."
 
 # 0. Resolve paths ---------------------------------------------------------
