@@ -17,6 +17,16 @@
     6. Prints PATH guidance (never silently mutates PATH).
 #>
 
+# [CmdletBinding()] with an empty param() makes PowerShell REJECT any argument
+# instead of silently dropping it into $args. This installer takes no flags
+# (store path comes from $env:OKFMEM_STORE), so any argument is a mistake --
+# e.g. a Unix-style `--foo`, or someone expecting an uninstall-style `-Store` /
+# `-DryRun`. Without this, such a flag was swallowed and the FULL install ran
+# regardless. Fail fast: "A parameter cannot be found that matches parameter
+# name 'X'." and nothing runs. (Mirrors the same guard in uninstall.ps1.)
+[CmdletBinding()]
+param()
+
 $ErrorActionPreference = "Stop"
 
 # Several steps below PROBE state with native commands that legitimately exit
@@ -79,12 +89,10 @@ Write-Host "=> Wrote okfmem.cmd / okfmem.ps1 wrappers to $BinDir"
 $StoreDir = $env:OKFMEM_STORE
 if (-not $StoreDir) { $StoreDir = Join-Path $env:USERPROFILE "okfmem-store" }
 
-$StoreCreated = $false
 if (-not (Test-Path $StoreDir)) {
     Write-Host "=> Creating local data store at $StoreDir"
     New-Item -ItemType Directory -Force -Path $StoreDir | Out-Null
     git -C "$StoreDir" init -q
-    $StoreCreated = $true
 } else {
     Write-Host "=> Found existing store at $StoreDir"
 }
@@ -156,7 +164,19 @@ function Link-ExistingStoreRemote {
 
     git -C "$StoreDir" rev-parse --verify --quiet HEAD 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        # Local store already has its own commits -- never clobber them.
+        # Local store already has its own commits -- never clobber them. Do set
+        # the upstream so `okfmem sync`/status and the uninstaller's
+        # unpushed-work checks track origin again (fetch above guarantees
+        # origin/$def exists locally). EAP is relaxed for the call: under 5.1,
+        # stderr redirection + ErrorActionPreference=Stop turns git's stderr
+        # into a terminating NativeCommandError.
+        $cur = (git -C "$StoreDir" branch --show-current)
+        if ($cur) {
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            git -C "$StoreDir" branch --set-upstream-to="origin/$def" $cur 2>$null | Out-Null
+            $ErrorActionPreference = $prevEap
+        }
         Write-Host "=> Remote linked as origin. Your local store already has commits;"
         Write-Host "   reconcile when ready:  git -C $StoreDir pull --rebase origin $def"
         return
@@ -177,6 +197,17 @@ function Link-ExistingStoreRemote {
     }
 }
 
+# Prompt helper. Deliberately does NOT pre-detect interactivity:
+# [Environment]::UserInteractive / [Console]::IsInputRedirected misclassify
+# real ConPTY terminals as non-interactive (the uninstaller had exactly this
+# bug), which made the remote-link question silently vanish. Read-Host itself
+# is the ground truth: it throws under `powershell -NonInteractive` (-> $null,
+# caller skips with the manual hint), returns '' on piped EOF, and prompts a
+# human everywhere else.
+function Read-PromptAnswer([string]$Prompt) {
+    try { return (Read-Host $Prompt) } catch { return $null }
+}
+
 function Set-StoreRemote {
     param([string]$StoreDir)
 
@@ -188,14 +219,12 @@ function Set-StoreRemote {
         return
     }
 
-    if (-not [Environment]::UserInteractive) { return }
-
     # Without gh we can't detect or create a repo, but the user may already have
     # one -- let them paste its URL so a returning user isn't stuck.
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        $ans = Read-Host "Link a GitHub remote for your store now? (you'll paste its URL) [y/N]"
-        if ($ans -notmatch '^[Yy]') { Write-ManualRemoteHint $StoreDir; return }
-        $url = Read-Host "  Remote URL (git@... or https://...)"
+        $ans = Read-PromptAnswer "Link a GitHub remote for your store now? (you'll paste its URL) [y/N]"
+        if (-not $ans -or $ans -notmatch '^[Yy]') { Write-ManualRemoteHint $StoreDir; return }
+        $url = Read-PromptAnswer "  Remote URL (git@... or https://...)"
         if (-not $url) { Write-ManualRemoteHint $StoreDir; return }
         Link-ExistingStoreRemote $StoreDir $url
         return
@@ -215,14 +244,20 @@ function Set-StoreRemote {
     if ($LASTEXITCODE -eq 0 -and $existing) {
         Write-Host "Found an existing private GitHub store:"
         Write-Host "    $existing"
-        $ans = Read-Host "Link it and pull your memory into $StoreDir now? [Y/n]"
-        if ($ans -match '^[Nn]') { Write-ManualRemoteHint $StoreDir; return }
+        # Explicit [y/N], unlike install.sh's [Y/n]: bash can trust `[ -t 0 ]`
+        # to tell a human from a pipe, but PowerShell cannot (see
+        # Read-PromptAnswer above) -- and Read-Host returns '' for BOTH "Enter
+        # on the default" and piped EOF. Linking a remote is an outward op, and
+        # the repo invariant says a no-TTY run takes the SKIP default -- so
+        # require an explicit yes rather than risk auto-linking in CI.
+        $ans = Read-PromptAnswer "Link it and pull your memory into $StoreDir now? [y/N]"
+        if (-not $ans -or $ans -notmatch '^[Yy]') { Write-ManualRemoteHint $StoreDir; return }
         Link-ExistingStoreRemote $StoreDir $existing
         return
     }
 
-    $ans = Read-Host "No GitHub store found. Create a PRIVATE 'okfmem-store' repo now? [y/N]"
-    if ($ans -notmatch '^[Yy]') { Write-ManualRemoteHint $StoreDir; return }
+    $ans = Read-PromptAnswer "No GitHub store found. Create a PRIVATE 'okfmem-store' repo now? [y/N]"
+    if (-not $ans -or $ans -notmatch '^[Yy]') { Write-ManualRemoteHint $StoreDir; return }
     Write-Host "=> Creating private repo 'okfmem-store' and wiring it as origin..."
     gh repo create okfmem-store --private --source "$StoreDir" --remote origin
     if ($LASTEXITCODE -ne 0) {
@@ -243,13 +278,14 @@ function Set-StoreRemote {
     }
     Write-Host "=> Store remote ready."
 }
-# Offer remote setup for a store we just created OR one that exists but is empty
-# (no commits) -- the latter is the returning-user case whose content lives on
-# GitHub and needs linking. An established local store WITH commits and no remote
-# is left alone (deliberately local-only); it got the `git remote add` hint above.
-git -C "$StoreDir" rev-parse --verify --quiet HEAD 2>$null | Out-Null
-$StoreEmpty = ($LASTEXITCODE -ne 0)
-if ($StoreCreated -or $StoreEmpty) { Set-StoreRemote $StoreDir }
+# Offer remote setup whenever the store has NO remote. Set-StoreRemote
+# early-returns if origin already exists, prompts [y/N] otherwise, and skips
+# cleanly when non-interactive -- so this is always safe to call. It
+# deliberately includes an established store WITH commits: uninstall.ps1 can
+# delink origin (with consent), so uninstall -> install must round-trip and
+# offer the way back. A deliberately local-only user just answers N and gets
+# the manual hint.
+Set-StoreRemote $StoreDir
 
 Write-Host ""
 Write-Host "okfmem installation complete!"

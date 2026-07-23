@@ -32,6 +32,18 @@ if [ "${OS:-}" = "Windows_NT" ] && command -v uname >/dev/null 2>&1; then
     fi
 fi
 
+# Reject stray arguments -----------------------------------------------------
+# This installer takes NO arguments (the store path comes from $OKFMEM_STORE,
+# default ~/okfmem-store). Reject anything passed rather than silently ignoring
+# it and running the FULL install -- e.g. a mistyped `--dry-run`, or an
+# uninstall-style `--store`. Mirrors the [CmdletBinding()] guard in install.ps1.
+if [ $# -gt 0 ]; then
+    echo "❌ Error: install.sh takes no arguments (got '$1')."
+    echo "   The store path comes from \$OKFMEM_STORE (default ~/okfmem-store)."
+    echo "   Usage:  ./install.sh"
+    exit 2
+fi
+
 echo "=> Installing okfmem..."
 
 # 0. Check dependencies
@@ -61,12 +73,10 @@ echo "=> Symlinked okfmem to ~/.local/bin/okfmem"
 
 # 2. Setup Data Store
 STORE_DIR="${OKFMEM_STORE:-$HOME/okfmem-store}"
-STORE_CREATED=0
 if [ ! -d "$STORE_DIR" ]; then
     echo "=> Creating local data store at $STORE_DIR"
     mkdir -p "$STORE_DIR"
     git -C "$STORE_DIR" init -q
-    STORE_CREATED=1
 else
     echo "=> Found existing store at $STORE_DIR"
 fi
@@ -124,7 +134,13 @@ link_existing_store_remote() {
     def="$(git -C "$store" remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p')"
     [ -n "$def" ] || def="main"
     if git -C "$store" rev-parse HEAD >/dev/null 2>&1; then
-        # Local store already has its own commits -- never clobber them.
+        # Local store already has its own commits -- never clobber them. Do set
+        # the upstream so `okfmem sync`/status and the uninstaller's
+        # unpushed-work checks track origin again (fetch above guarantees
+        # origin/$def exists locally).
+        local cur
+        cur="$(git -C "$store" branch --show-current)"
+        [ -n "$cur" ] && git -C "$store" branch --set-upstream-to="origin/$def" "$cur" >/dev/null 2>&1 || true
         echo "=> Remote linked as origin. Your local store already has commits;"
         echo "   reconcile when ready:  git -C $store pull --rebase origin $def"
         return 0
@@ -197,15 +213,14 @@ setup_store_remote() {
     fi
     echo "=> Store remote ready."
 }
-# Offer remote setup for a store we just created OR one that exists but is empty
-# (no commits) -- the latter is the returning-user case whose content lives on
-# GitHub and needs linking. An established local store WITH commits and no remote
-# is left alone (deliberately local-only); it got the `git remote add` hint above.
-STORE_EMPTY=0
-git -C "$STORE_DIR" rev-parse HEAD >/dev/null 2>&1 || STORE_EMPTY=1
-if [ "$STORE_CREATED" -eq 1 ] || [ "$STORE_EMPTY" -eq 1 ]; then
-    setup_store_remote "$STORE_DIR" || true
-fi
+# Offer remote setup whenever the store has NO remote. setup_store_remote
+# early-returns if origin already exists, prompts [y/N] otherwise, and skips
+# cleanly when non-interactive -- so this is always safe to call. It
+# deliberately includes an established store WITH commits: uninstall.sh can
+# delink origin (with consent), so uninstall -> install must round-trip and
+# offer the way back. A deliberately local-only user just answers N and gets
+# the manual hint.
+setup_store_remote "$STORE_DIR" || true
 
 echo ""
 echo "✅ okfmem installation complete!"
