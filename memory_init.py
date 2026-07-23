@@ -713,9 +713,28 @@ def _current_git_root():
     directly comparable to registry.json keys and safe to feed to
     `encode_root`."""
     try:
+        # Force C locale so the "not a git repository" match below is reliable
+        # regardless of the user's git locale -- otherwise the ordinary
+        # not-in-a-repo case prints a spurious diagnostic on a non-English box.
         out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                              capture_output=True, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError):
+                              capture_output=True, text=True,
+                              env={**os.environ, "LC_ALL": "C"})
+    except OSError as e:
+        # git missing from PATH / not executable -- a real failure, not the
+        # ordinary "cwd isn't a repo" case. Surface it so it isn't silently
+        # misreported downstream as "not inside a git repo".
+        print(f"okfmem: could not run git to find the repo root: {e}",
+              file=sys.stderr)
+        return None
+    if out.returncode != 0:
+        stderr = (out.stderr or "").strip()
+        # rc 128 + "not a git repository" is the expected not-in-a-repo case
+        # (e.g. installer launched from ~) -- stay quiet, callers report a
+        # clean skip. Anything else is unexpected: surface rc + stderr.
+        if not (out.returncode == 128
+                and "not a git repository" in stderr.lower()):
+            print(f"okfmem: git rev-parse failed (rc={out.returncode}): "
+                  f"{stderr or 'no stderr'}", file=sys.stderr)
         return None
     return os.path.normpath(out.stdout.strip())
 
@@ -759,10 +778,35 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
     proj_dir = os.path.join(claude_projects, encode_root(root))
     link = os.path.join(proj_dir, "memory")
 
+    # A tier-3 managed copy is a plain directory carrying our marker (the box
+    # had neither symlink nor junction available). `_managed_copy_target`
+    # returns the recorded source path, or None if this isn't our copy.
+    managed_copy = _managed_copy_target(link)
+
     if os.path.islink(link) or _is_junction(link):
         if os.path.normcase(os.path.realpath(link)) == os.path.normcase(target_real):
             tier = "symlink" if os.path.islink(link) else "junction"
             return ("ok", f"{name} ({tier})")
+        verb = "repoint"
+    elif managed_copy is not None:
+        # Our own tier-3 copy: recognize and refresh it the way `link_skills`
+        # does, instead of misfiling it as a user's real dir ("resolve by
+        # hand"). Idempotency is decided on TARGET identity (recorded marker
+        # path vs the resolved store project) -- the same basis the live-link
+        # branches above use. Deliberately NOT a byte-for-byte content compare
+        # (which `link_skills` does for its single engine-versioned SKILL.md):
+        # memory pages change every session, so content-comparing would re-copy
+        # on nearly every run. Repoint only when the copy points at a different
+        # project (rename/move); the "will go stale; re-run init" note carries
+        # the content-refresh expectation for this rare last-resort tier.
+        if os.path.normcase(os.path.realpath(managed_copy)) == \
+                os.path.normcase(target_real):
+            # A copy is a frozen snapshot, not a live link: pages added to the
+            # store since it was made are NOT reflected, and (unlike a target
+            # rename) init won't re-copy while the target matches. Flag it so
+            # "up to date" doesn't read as "current". To refresh, delete the
+            # copy and re-init (or enable a live link via Developer Mode).
+            return ("ok", f"{name} (copy — frozen snapshot)")
         verb = "repoint"
     elif os.path.isdir(link):
         if os.listdir(link):
@@ -784,6 +828,8 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
         os.remove(link)
     elif _is_junction(link):
         os.rmdir(link)  # unlink the reparse point, not the target
+    elif managed_copy is not None:
+        shutil.rmtree(link)  # our tier-3 copy: a non-empty real dir we own
     elif os.path.isdir(link):
         os.rmdir(link)  # confirmed empty above
     tier = _make_link(target_real, link)
@@ -1046,7 +1092,37 @@ def wire_pull_hook(dry_run):
     return ("added", settings)
 
 
-def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
+def _prompt_yes_no(question, *, assume_yes, non_interactive, manual_hint):
+    """Rung-2 confirmation gate (see CLAUDE.md 'Confirmation discipline').
+
+    Returns True to proceed with a config-mutating op. `assume_yes` (the
+    installer / `--yes` / CI path) short-circuits to True. A non-interactive
+    run WITHOUT assume_yes takes the safe default -- skip -- and prints the
+    exact manual command so an automated install never hangs on a prompt and
+    the user can still apply it later. Otherwise ask, defaulting to No.
+
+    Prints its own outcome line (so the caller doesn't double-report), and
+    returns the decision so the caller can skip the actual mutation."""
+    if assume_yes:
+        return True
+    if non_interactive:
+        print(f"{glyph('ok')} {question}\n    skipped (non-interactive). "
+              f"{manual_hint}")
+        return False
+    try:
+        ans = input(f"{question} [y/N] ").strip().lower()
+    except EOFError:
+        # stdin closed mid-prompt -- treat as the safe default, not a crash.
+        print(f"    skipped. {manual_hint}")
+        return False
+    if ans in ("y", "yes"):
+        return True
+    print(f"    skipped. {manual_hint}")
+    return False
+
+
+def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
+            assume_yes=False):
     """Wire the store into every harness and report the result.
 
     Output is quiet-by-default: each of the five steps prints ONE status line
@@ -1073,21 +1149,42 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
             k = "ok" if path else "warn"
             print(f"    {glyph(k)} {name:12} {_short(path) if path else 'not found'}")
 
+    # --- config-mutation gate (rung-2; CLAUDE.md 'Confirmation discipline') -
+    # init mutates user config: writes ~/.claude/settings.json (hooks), injects
+    # okfmem's pointer block into the harness globals (~/.claude/CLAUDE.md,
+    # ~/.gemini/config/AGENTS.md), and creates skill/memory links under
+    # ~/.claude. All of that sits behind ONE consent gate. --dry-run only
+    # previews (never prompts). Otherwise ask once; --yes (installers/CI) or a
+    # non-TTY caller resolve without blocking -- skipping and printing the
+    # manual command rather than hanging. The registry write to the STORE (the
+    # user's own data repo) is additive bookkeeping (rung-1) and runs either way.
+    config_hint = "Apply later with: okfmem init --yes"
+    if dry_run:
+        apply_config = True  # preview only -- ops run in dry_run, mutate nothing
+    else:
+        apply_config = _prompt_yes_no(
+            "Wire okfmem into ~/.claude (hooks, harness pointers, and skill/"
+            "memory links)?", assume_yes=assume_yes,
+            non_interactive=not sys.stdin.isatty(), manual_hint=config_hint)
+
     # --- 1b. memory link (current repo) ------------------------------------
     # Runs BEFORE the registry step, on the registry as it exists on disk,
     # so name resolution doesn't depend on the link we're about to create --
     # and so that once created, THIS run's registry build (below) already
     # sees it and reports the project as linked, with no second `init` needed.
-    existing_reg = _load_registry(os.path.join(store, "registry.json"))
-    maction, mmsg = link_project_memory(store, claude_projects, harnesses,
-                                         existing_reg, dry_run)
-    if maction == "changed":
-        changes += 1
-        print(f"{glyph('chg')} memory link {mmsg}")
-    elif maction == "ok":
-        print(f"{glyph('ok')} memory link up to date ({mmsg})")
+    if apply_config:
+        existing_reg = _load_registry(os.path.join(store, "registry.json"))
+        maction, mmsg = link_project_memory(store, claude_projects, harnesses,
+                                             existing_reg, dry_run)
+        if maction == "changed":
+            changes += 1
+            print(f"{glyph('chg')} memory link {mmsg}")
+        elif maction == "ok":
+            print(f"{glyph('ok')} memory link up to date ({mmsg})")
+        else:
+            print(f"{glyph('ok')} memory link skipped ({mmsg})")
     else:
-        print(f"{glyph('ok')} memory link skipped ({mmsg})")
+        print(f"{glyph('ok')} memory link skipped (config changes declined)")
 
     # --- 2. registry -------------------------------------------------------
     reg, drift = build_registry(store, claude_projects)
@@ -1110,19 +1207,27 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
         print(f"    {glyph('warn')} {d}")
 
     # --- 3. pointers -------------------------------------------------------
-    pacts = [(n, upsert_pointer(p, dry_run), p)
-             for n, p in harnesses.items() if p]
-    pchg = [a for a in pacts if a[1] != "unchanged"]
-    changes += len(pchg)
-    if pchg:
-        print(f"{glyph('chg')} pointers    "
-              f"{len(pchg)} to write ({len(pacts)} harness globals)")
+    # Also rung-2: upsert_pointer injects okfmem's managed block into the
+    # user's hand-edited harness globals (~/.claude/CLAUDE.md,
+    # ~/.gemini/config/AGENTS.md). That's user-config mutation, so it lives
+    # under the same consent gate as the hooks/links above -- declining must
+    # leave those files untouched.
+    if not apply_config:
+        print(f"{glyph('ok')} pointers    skipped (config changes declined)")
     else:
-        print(f"{glyph('ok')} pointers    up to date ({len(pacts)} harness globals)")
-    if verbose or pchg:
-        for name, action, path in pacts:
-            k = "ok" if action == "unchanged" else "chg"
-            print(f"    {glyph(k)} {name:12} {action:10} {_short(path)}")
+        pacts = [(n, upsert_pointer(p, dry_run), p)
+                 for n, p in harnesses.items() if p]
+        pchg = [a for a in pacts if a[1] != "unchanged"]
+        changes += len(pchg)
+        if pchg:
+            print(f"{glyph('chg')} pointers    "
+                  f"{len(pchg)} to write ({len(pacts)} harness globals)")
+        else:
+            print(f"{glyph('ok')} pointers    up to date ({len(pacts)} harness globals)")
+        if verbose or pchg:
+            for name, action, path in pacts:
+                k = "ok" if action == "unchanged" else "chg"
+                print(f"    {glyph(k)} {name:12} {action:10} {_short(path)}")
 
     # --- 4. stale references ----------------------------------------------
     findings = scan_stale(reg, harnesses["claude_code"] or "",
@@ -1172,10 +1277,14 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
                      f"{cats['path']} path line(s)", "dim"))
 
     # --- 5. skills ---------------------------------------------------------
-    sk = link_skills(dry_run)
-    if not sk:
-        print(f"{glyph('warn')} skills      none to link (no harness skill dirs)")
+    if not apply_config:
+        print(f"{glyph('ok')} skills      skipped (config changes declined)")
+        sk = []
     else:
+        sk = link_skills(dry_run)
+    if apply_config and not sk:
+        print(f"{glyph('warn')} skills      none to link (no harness skill dirs)")
+    elif apply_config:
         chg = [a for a in sk if a[2] != "ok"]
         changes += len(chg)
         n_ok = len(sk) - len(chg)
@@ -1193,7 +1302,9 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
                 print(f"    {glyph('chg')} {harness:12} {action:16} {name}")
 
     # --- 6. Stop hook (Claude Code, auto-wired) ---------------------------
-    if wire_hook:
+    if not apply_config:
+        print(f"{glyph('ok')} stop hook   skipped (config changes declined)")
+    elif wire_hook:
         haction, hpath = wire_stop_hook(dry_run)
         if haction == "added":
             changes += 1
@@ -1210,7 +1321,9 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
         print(f"{glyph('ok')} stop hook   skipped (--no-hook)")
 
     # --- 7. SessionStart pull hook (cross-machine sync, auto-wired) --------
-    if wire_hook:
+    if not apply_config:
+        print(f"{glyph('ok')} pull hook   skipped (config changes declined)")
+    elif wire_hook:
         paction, ppath = wire_pull_hook(dry_run)
         if paction in ("added", "healed"):
             changes += 1
@@ -1418,6 +1531,11 @@ def main():
                     help="do not auto-wire the Claude Code consolidation Stop "
                          "hook or the SessionStart store-pull hook into "
                          "~/.claude/settings.json")
+    ap.add_argument("-y", "--yes", action="store_true",
+                    help="apply config changes (settings.json hooks + skill/"
+                         "memory links under ~/.claude) without prompting -- "
+                         "for installers/CI. A non-interactive run WITHOUT this "
+                         "skips them and prints the manual command instead.")
     ap.add_argument("--store", default=os.environ.get(
         "OKFMEM_STORE", os.path.expanduser("~/okfmem-store")))
     args = ap.parse_args()
@@ -1431,7 +1549,7 @@ def main():
         cmd_status(store)
     else:
         cmd_run(store, args.dry_run, args.apply_cleanup, args.verbose,
-                wire_hook=not args.no_hook)
+                wire_hook=not args.no_hook, assume_yes=args.yes)
 
 
 if __name__ == "__main__":

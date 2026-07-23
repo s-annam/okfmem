@@ -98,7 +98,19 @@ New-Item -ItemType Directory -Force -Path (Join-Path $StoreDir "projects") | Out
 # 3. Wire it up -------------------------------------------------------------
 Write-Host "=> Running backfill and initialization..."
 & $PyCmd (Join-Path $EngineDir "memory_backfill.py")
-& $PyCmd (Join-Path $EngineDir "memory_init.py")
+# memory_init's per-project memory link resolves the CURRENT repo from the
+# process cwd (git rev-parse). This installer may be launched from anywhere
+# (e.g. the user's home dir), so run init FROM the engine clone -- otherwise
+# the link step sees no git repo and skips. Push/Pop guarantees we restore cwd.
+Push-Location $EngineDir
+try {
+    # --yes: running this installer IS the user's consent to wire hooks +
+    # create the skill/memory links, so init applies them without re-prompting.
+    # (The outward GitHub-remote step below is still gated separately.)
+    & $PyCmd (Join-Path $EngineDir "memory_init.py") --yes
+} finally {
+    Pop-Location
+}
 
 # 4. Optional: private GitHub remote for the store ------------------------
 # Both linking an existing repo and creating a new one are outward-facing, so we

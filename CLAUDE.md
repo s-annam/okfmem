@@ -38,6 +38,32 @@ always-loaded index stays lean instead of growing into an endless scratchpad.
 a separate private *store* resolved per-command as `--store PATH`, else `$OKFMEM_STORE`, else
 `~/okfmem-store`. The store is never committed here.
 
+## Confirmation discipline
+
+okfmem's own scripts must never mutate outward-facing or user-owned state *silently*, and never
+destroy data without a deliberate, hard-to-fumble confirmation. Every state-changing op sits on a
+three-rung ladder; write it to the rung that matches its blast radius, by default, instead of
+rediscovering the right friction per-PR:
+
+| Rung | Examples | Required friction |
+|---|---|---|
+| **Read-only / additive-safe** | `okfmem status`, `okfmem pull` (fail-open no-op), report-only warnings | none |
+| **Outward or user-config mutating** | write `~/.claude/settings.json` (hook wiring), create symlinks/junctions/copies under `~/.claude`, add/set a git remote, push | **yes/no confirm** (`[y/N]`) |
+| **Destructive / irreversible** | delete the store, wipe memory pages, remove wired hooks, `Remove-Item -Recurse` | **typed confirmation** (retype a word/path), never a bare `-Force` |
+
+This is not new — it is the discipline the codebase already applies in its best spots, made
+consistent. `detect_legacy_clone` is the gold standard: it **warns, never deletes, hands the user
+the command.** `install.ps1::Set-StoreRemote` already gates the outward GitHub-remote step behind
+`[y/N]`.
+
+Two invariants keep the friction from becoming a regression:
+
+- **Every prompt is skippable non-interactively.** A piped / CI install (no TTY) takes the
+  documented default — skip the outward op — and **prints the exact manual command** to run it
+  later (the `install.ps1::Write-ManualRemoteHint` pattern). A confirmation that can't be scripted
+  around is a bug for automated installs.
+- **Never prompt on rung-1 ops.** Friction on `status` / a fail-open `pull` is pure annoyance.
+
 ## Stack and commands
 
 Pure Python 3.11+, standard library only for the core. Entry point is the `okfmem` dispatcher,
