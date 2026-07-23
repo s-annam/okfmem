@@ -4,21 +4,26 @@
 Anchors the OKF memory store into every AI-coding harness on this machine and
 records how a working directory maps to a memory project. Re-runnable to repair.
 
-Does four things:
+Does five things:
 
   1. Detect harnesses — Claude Code (`~/.claude/`), Antigravity (`~/.gemini/`
      and/or `agy` on PATH).
-  2. Write a managed MEMORY-POINTER block (delimited by HTML-comment markers)
-     into each detected harness's global slot, editing in place between the
-     markers — never duplicating, never touching surrounding content:
-       Claude Code  -> ~/.claude/CLAUDE.md
-       Antigravity  -> ~/.gemini/config/AGENTS.md   (global user-rule)
+  2. Create/repair the CURRENT repo's per-project memory symlink --
+     `~/.claude/projects/<encoded-root>/memory` -> `<store>/projects/<name>`
+     -- when the store already has a project dir for it. Without this, a
+     fresh machine leaves that dir an empty real directory forever: nothing
+     for the harness to auto-load, and nothing for step 3 to discover.
   3. Build/refresh `<store>/registry.json` — absolute git-root -> project name.
      Source of truth is the set of `~/.claude/projects/<encoded>/memory`
      symlinks: the symlink target's basename is the project; the encoded dir
      name decodes (filesystem-probed) to the real git root. Default rule is
      `basename(git-root)`; anything that deviates is recorded as an override.
-  4. Stale-reference cleanup — scan registered project roots' CLAUDE.md /
+  4. Write a managed MEMORY-POINTER block (delimited by HTML-comment markers)
+     into each detected harness's global slot, editing in place between the
+     markers — never duplicating, never touching surrounding content:
+       Claude Code  -> ~/.claude/CLAUDE.md
+       Antigravity  -> ~/.gemini/config/AGENTS.md   (global user-rule)
+  5. Stale-reference cleanup — scan registered project roots' CLAUDE.md /
      AGENTS.md / CLAUDE.local.md for retired-system references (memgraph, ck,
      projector, ...). DETECTION + report only by default; actual rewriting is
      gated behind --apply-cleanup (deferred — hand-review first).
@@ -205,6 +210,24 @@ def decode_root(encoded):
         path = os.path.join(path, best)
         i = best_j + 1
     return os.path.normpath(path)
+
+
+def encode_root(root):
+    """Inverse of `decode_root`: turn an absolute git root into the on-disk
+    Claude Code project-dir encoding (`~/.claude/projects/<encoded>/`).
+
+    Claude Code encodes a cwd by replacing path separators with '-'. On
+    Windows, `str(WindowsPath)` uses '\\', and the drive colon is ALSO
+    replaced (`C:\\Users\\name\\proj` -> `C--Users-name-proj`, a double dash
+    between the drive letter and the next segment) -- `decode_root`'s
+    `_windows_drive_root` already tolerates both the bare-letter and
+    colon-suffixed first-token shapes, so this stays the single inverse for
+    both. POSIX is untouched: only '/' is replaced."""
+    root = os.path.normpath(root)
+    if os.name == "nt":
+        root = root.replace(":", "-")
+        return root.replace("\\", "-")
+    return root.replace("/", "-")
 
 
 # ---------------------------------------------------------------------------
@@ -684,12 +707,119 @@ def link_skills(dry_run):
     return actions
 
 
+def _current_git_root():
+    """Absolute git root of the current working directory, or None if cwd
+    isn't inside a git repo (or `git` isn't on PATH). Normalized so it is
+    directly comparable to registry.json keys and safe to feed to
+    `encode_root`."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return os.path.normpath(out.stdout.strip())
+
+
+def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
+    """Create/repair the per-project memory symlink for the CURRENT repo
+    (cwd's git root) -- `<claude_projects>/<encoded-root>/memory` ->
+    `<store>/projects/<name>`.
+
+    This is the missing half of `build_registry` (which only READS these
+    links, never creates them) and of a harness's `STATE.md`/`MEMORY.md`
+    auto-load: without it, a fresh machine leaves the memory dir as an empty
+    real directory forever. Reuses `_make_link`'s tiered fallback (symlink ->
+    junction -> copy), so this needs no elevation on Windows, exactly like
+    `link_skills`.
+
+    `reg` is a loaded registry dict (at least an `overrides` key) used ONLY
+    to resolve root -> project name (the same `basename(root) unless
+    overridden` rule the registry itself documents) -- pass the registry as
+    it exists on disk BEFORE this run's `build_registry` re-derives it, so
+    name resolution doesn't depend on a link this function is about to create.
+
+    Returns (status, message):
+      status in {"ok", "changed", "skip"}. "ok" = already correctly linked
+      (idempotent no-op, matching the rest of `init`); "changed" = created or
+      repaired (or, under `dry_run`, would be); "skip" = nothing to do this
+      run, with the reason in `message` -- not in a git repo, no Claude Code
+      harness detected, or the store has no project dir for this repo yet
+      (nothing to link to before a first page is ever authored).
+    """
+    if not harnesses.get("claude_code"):
+        return ("skip", "no Claude Code harness detected")
+    root = _current_git_root()
+    if not root:
+        return ("skip", "not inside a git repo")
+    name = reg.get("overrides", {}).get(root, os.path.basename(root))
+    target = os.path.join(store, "projects", name)
+    if not os.path.isdir(target):
+        return ("skip", f"no store project dir for '{name}' yet")
+    target_real = os.path.realpath(target)
+    proj_dir = os.path.join(claude_projects, encode_root(root))
+    link = os.path.join(proj_dir, "memory")
+
+    if os.path.islink(link) or _is_junction(link):
+        if os.path.normcase(os.path.realpath(link)) == os.path.normcase(target_real):
+            tier = "symlink" if os.path.islink(link) else "junction"
+            return ("ok", f"{name} ({tier})")
+        verb = "repoint"
+    elif os.path.isdir(link):
+        if os.listdir(link):
+            return ("skip", "non-empty directory already at the memory link "
+                             "path — resolve by hand")
+        verb = "link"  # empty placeholder dir left by the harness -- nothing
+        # was pointed before, so "linked to X" reads correctly (not "repointed").
+        # The "empty real directory" case this issue exists for; safe to replace.
+    elif os.path.exists(link):
+        return ("skip", "unexpected file at the memory link path")
+    else:
+        verb = "link"
+
+    if dry_run:
+        return ("changed", f"would {verb} to {name}")
+
+    os.makedirs(proj_dir, exist_ok=True)
+    if os.path.islink(link):
+        os.remove(link)
+    elif _is_junction(link):
+        os.rmdir(link)  # unlink the reparse point, not the target
+    elif os.path.isdir(link):
+        os.rmdir(link)  # confirmed empty above
+    tier = _make_link(target_real, link)
+    if tier == "symlink":
+        tier_note = ""
+    elif tier == "junction":
+        tier_note = " (junction)"
+    else:
+        tier_note = (" (copy — will go stale; re-run okfmem init after "
+                      "engine updates)")
+    return ("changed", f"{verb}ed to {name}{tier_note}")
+
+
+def _write_settings_json(claude_dir, settings, data):
+    """Write `data` to Claude Code's `settings.json`, backing up the
+    immediately-prior state to `.okfmem.bak` on each write (the backup is
+    overwritten every time, not kept once). Shared by `wire_stop_hook` and
+    `wire_pull_hook` so both hooks back up/write identically."""
+    os.makedirs(claude_dir, exist_ok=True)
+    if os.path.exists(settings):
+        try:
+            shutil.copy2(settings, settings + ".okfmem.bak")
+        except OSError:
+            pass  # backup is best-effort; the write below is the real work
+    with open(settings, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
 def wire_stop_hook(dry_run):
     """Idempotently wire okfmem's consolidation Stop hook into Claude Code's
     ~/.claude/settings.json so a fresh install needs no manual JSON paste.
 
     Returns (action, path):
-      'added'      — appended our Stop hook (a one-time .okfmem.bak is written)
+      'added'      — appended our Stop hook (.okfmem.bak backs up the
+                     immediately-prior state; overwritten on each write)
       'present'    — a Stop hook already runs memory_consolidate.py; left as-is
       'no-claude'  — ~/.claude missing; nothing to wire (other harnesses differ)
       'skip (...)' — settings.json unreadable/wrong shape; print the snippet
@@ -734,15 +864,185 @@ def wire_stop_hook(dry_run):
 
     stop.append({"hooks": [{"type": "command", "command": command}]})
     if not dry_run:
-        os.makedirs(claude_dir, exist_ok=True)
-        if os.path.exists(settings):
-            try:
-                shutil.copy2(settings, settings + ".okfmem.bak")
-            except OSError:
-                pass  # backup is best-effort; the write below is the real work
-        with open(settings, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
+        _write_settings_json(claude_dir, settings, data)
+    return ("added", settings)
+
+
+# ---------------------------------------------------------------------------
+# SessionStart store-pull hook (cross-machine sync)
+# ---------------------------------------------------------------------------
+# Pre-#16, the ONLY way this hook existed was a hand-added `git -C <path> pull
+# --rebase` command per the manual setup instructions (see the `okfmem` skill's
+# old "Usage" section) -- never through the okfmem CLI. SessionStart has no
+# other conventional use for a raw `git ... pull` command, so ANY such entry
+# that isn't already ours is that legacy shape and is unconditionally stale:
+# it freezes the store path at the moment someone typed it, so a store rename
+# (the `claude-memory` -> `okfmem-store` migration this issue's evidence
+# describes) leaves it silently pulling a dead clone forever. Treat it the
+# same way MEMORY-POINTER/Stop-hook markers are treated -- heal in place, no
+# human required.
+# Only the pre-#16 MANAGED shape heals: a raw `git -C <path> pull` whose
+# <path> references the memory store (the `claude-memory` -> `okfmem-store`
+# clone this heal exists for). A user's unrelated `git -C ~/notes pull`
+# SessionStart hook must be LEFT ALONE — the old unanchored `\bgit\b.*\bpull\b`
+# clobbered it. Match `git ... -C <path-with-a-store-name> ... pull`.
+_LEGACY_STORE_NAMES = r"(?:claude-memory|okfmem-store|okfmem[\\/]store)"
+# NB: NOT DOTALL and matched per shell-segment (see `_split_command_segments`).
+# `.*` must never span a `;`/`&&` into a second, unrelated `git ... pull`
+# clause — a compound line like
+#   git -C "~/okfmem-store" fetch; git -C "~/my-notes" pull --rebase
+# has the store-named part and the unrelated pull in DIFFERENT segments, so
+# neither segment alone is legacy and the whole line is left untouched.
+_LEGACY_PULL_RE = re.compile(
+    r"\bgit\b.*-C\s+[\"']?[^\"'\s]*" + _LEGACY_STORE_NAMES + r"[^\"'\s]*"
+    r"[\"']?.*\bpull\b",
+    re.IGNORECASE)
+# Any `git ... pull` in a single segment, store-named or not — used to detect
+# an unrelated pull we must NOT clobber.
+_ANY_GIT_PULL_RE = re.compile(r"\bgit\b.*\bpull\b", re.IGNORECASE)
+# Shell command separators that start a fresh command clause.
+_CMD_SEPARATORS = re.compile(r"(?:&&|\|\||[;&\n])")
+
+
+def _split_command_segments(cmd):
+    """Split a hook command line into independent shell-command segments on
+    `;`, `&&`, `||`, `&`, and newlines, so a per-invocation regex can't leak
+    `.*` across an unrelated clause. Cheap textual split (not a real shell
+    parse) — good enough to keep each `git ... pull` isolated."""
+    return [seg.strip() for seg in _CMD_SEPARATORS.split(cmd) if seg.strip()]
+
+
+def _is_managed_pull_command(cmd):
+    """True if `cmd` already invokes okfmem's own `pull` subcommand (any prior
+    okfmem release / engine path), so re-running init recognizes an
+    up-to-date entry and leaves it alone rather than rewriting every run."""
+    return bool(re.search(r"\bokfmem[\"']?\s+pull\b", cmd))
+
+
+def _is_legacy_pull_command(cmd):
+    """True if `cmd` is the pre-#16 hand-added managed store-pull shape that
+    should heal in place. Guards two ways: a command that already invokes
+    okfmem's own `pull` subcommand (our managed line) is NEVER legacy, and
+    only a `git -C <store-path> pull` whose path names the memory store
+    matches — an unrelated `git -C ~/notes pull` is left alone. Note the store
+    dir may itself be named `okfmem-store`, so the guard keys on the okfmem
+    *CLI invocation*, not the bare substring `okfmem`.
+
+    Compound lines are split into shell segments first: a command is legacy
+    ONLY if at least one segment is the store-named legacy pull AND no segment
+    is an unrelated `git ... pull` we'd otherwise clobber. So
+    `git -C "~/okfmem-store" fetch; git -C "~/my-notes" pull` is left alone —
+    its pull segment isn't store-named."""
+    if _is_managed_pull_command(cmd):
+        return False
+    segments = _split_command_segments(cmd)
+    has_legacy = any(_LEGACY_PULL_RE.search(seg) for seg in segments)
+    if not has_legacy:
+        return False
+    # Any git-pull segment that is NOT the store-named legacy shape is an
+    # unrelated pull — refuse to heal (would destroy the user's own hook).
+    for seg in segments:
+        if _ANY_GIT_PULL_RE.search(seg) and not _LEGACY_PULL_RE.search(seg):
+            return False
+    return True
+
+
+def detect_legacy_clone():
+    """Detect a leftover `~/claude-memory` git clone from the claude-memory ->
+    okfmem-store rename (the dead-clone bug #16 exists to prevent recurring).
+    Returns the path if found, else None. NEVER deleted automatically --
+    migration cleanup is left to the user; this is report-only."""
+    legacy = os.path.join(os.path.expanduser("~"), "claude-memory")
+    if os.path.isdir(os.path.join(legacy, ".git")):
+        return legacy
+    return None
+
+
+def wire_pull_hook(dry_run):
+    """Idempotently wire a SessionStart hook that runs `okfmem pull --quiet`
+    (memory_pull.py) so a session on ANY machine starts from the store's
+    latest pushed state -- before the harness auto-loads STATE.md/MEMORY.md.
+
+    Mirrors `wire_stop_hook`'s contract (same settings.json shape, same
+    backup-then-write discipline via `_write_settings_json`) but additionally
+    HEALS a legacy hand-added hook: a raw `git -C <path> pull --rebase`
+    command from the pre-#16 manual setup instructions, most visibly the case
+    where `<path>` still points at the pre-rename `claude-memory` clone. Any
+    such entry -- or a stale command from an older okfmem release -- is
+    replaced in place with the current `okfmem pull --quiet` invocation, which
+    always resolves the CURRENT store (`--store` -> `$OKFMEM_STORE` ->
+    `~/okfmem-store`) rather than a path frozen at hook-write time.
+
+    Fail-open is enforced by `okfmem pull` itself (memory_pull.py), not here:
+    this only ever writes `... pull --quiet`, which exits 0 on
+    offline/no-op/already-up-to-date and 1 ONLY on a manual rebase conflict a
+    human must resolve by hand -- Claude Code does not treat a hook's exit
+    code as fatal to SessionStart, so this never blocks a session.
+
+    The command embeds the absolute interpreter (`sys.executable`) and engine
+    script path via `os.path.join`/f-string (not a hardcoded shell path), so
+    it is portable across macOS/Linux/Windows without hand-editing -- same
+    approach `wire_stop_hook` already uses for the consolidation hook.
+
+    Returns (action, path):
+      'added'      — no prior SessionStart pull hook; appended ours
+      'healed'     — replaced a legacy/stale entry (raw git pull, or an
+                     outdated okfmem command) with the current one
+      'present'    — already wired correctly; left as-is
+      'no-claude'  — ~/.claude missing; nothing to wire
+      'skip (...)' — settings.json unreadable/wrong shape; print the snippet
+    """
+    home = os.path.expanduser("~")
+    claude_dir = os.path.join(home, ".claude")
+    if not os.path.isdir(claude_dir):
+        return ("no-claude", None)
+    settings = os.path.join(claude_dir, "settings.json")
+    engine = os.path.dirname(os.path.realpath(__file__))
+    okfmem_cli = os.path.join(engine, "okfmem")
+    # Absolute interpreter + script: robust at hook time regardless of PATH,
+    # cross-platform (os.path.join uses the right separator per-OS).
+    command = f'"{sys.executable}" "{okfmem_cli}" pull --quiet'
+
+    data = {}
+    if os.path.exists(settings):
+        try:
+            with open(settings, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return ("skip (settings.json unreadable — wire manually)", settings)
+    if not isinstance(data, dict):
+        return ("skip (settings.json not an object — wire manually)", settings)
+
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return ("skip (hooks not an object — wire manually)", settings)
+    starts = hooks.setdefault("SessionStart", [])
+    if not isinstance(starts, list):
+        return ("skip (SessionStart hook not a list — wire manually)", settings)
+
+    for group in starts:
+        if not isinstance(group, dict):
+            continue
+        for h in group.get("hooks", []):
+            if not isinstance(h, dict):
+                continue
+            cur = h.get("command", "")
+            if _is_managed_pull_command(cur):
+                if cur == command:
+                    return ("present", settings)
+                h["command"] = command  # heal: older okfmem release/path
+                if not dry_run:
+                    _write_settings_json(claude_dir, settings, data)
+                return ("healed", settings)
+            if _is_legacy_pull_command(cur):
+                h["command"] = command  # heal: pre-#16 hand-added raw git pull
+                if not dry_run:
+                    _write_settings_json(claude_dir, settings, data)
+                return ("healed", settings)
+
+    starts.append({"hooks": [{"type": "command", "command": command}]})
+    if not dry_run:
+        _write_settings_json(claude_dir, settings, data)
     return ("added", settings)
 
 
@@ -772,6 +1072,22 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
         for name, path in harnesses.items():
             k = "ok" if path else "warn"
             print(f"    {glyph(k)} {name:12} {_short(path) if path else 'not found'}")
+
+    # --- 1b. memory link (current repo) ------------------------------------
+    # Runs BEFORE the registry step, on the registry as it exists on disk,
+    # so name resolution doesn't depend on the link we're about to create --
+    # and so that once created, THIS run's registry build (below) already
+    # sees it and reports the project as linked, with no second `init` needed.
+    existing_reg = _load_registry(os.path.join(store, "registry.json"))
+    maction, mmsg = link_project_memory(store, claude_projects, harnesses,
+                                         existing_reg, dry_run)
+    if maction == "changed":
+        changes += 1
+        print(f"{glyph('chg')} memory link {mmsg}")
+    elif maction == "ok":
+        print(f"{glyph('ok')} memory link up to date ({mmsg})")
+    else:
+        print(f"{glyph('ok')} memory link skipped ({mmsg})")
 
     # --- 2. registry -------------------------------------------------------
     reg, drift = build_registry(store, claude_projects)
@@ -892,6 +1208,32 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True):
             print(f"{glyph('warn')} stop hook   {haction}")
     else:
         print(f"{glyph('ok')} stop hook   skipped (--no-hook)")
+
+    # --- 7. SessionStart pull hook (cross-machine sync, auto-wired) --------
+    if wire_hook:
+        paction, ppath = wire_pull_hook(dry_run)
+        if paction in ("added", "healed"):
+            changes += 1
+            verb = ("would wire" if dry_run else "wired") if paction == "added" \
+                else ("would heal" if dry_run else "healed")
+            print(f"{glyph('chg')} pull hook   {verb} store-pull hook "
+                  f"({_short(ppath)})")
+        elif paction == "present":
+            print(f"{glyph('ok')} pull hook   already wired ({_short(ppath)})")
+        elif paction == "no-claude":
+            print(f"{glyph('ok')} pull hook   no Claude Code dir — skipped")
+        else:
+            print(f"{glyph('warn')} pull hook   {paction}")
+    else:
+        print(f"{glyph('ok')} pull hook   skipped (--no-hook)")
+
+    # --- 8. leftover claude-memory clone (migration cleanup, warn only) ----
+    legacy = detect_legacy_clone()
+    if legacy:
+        print(f"{glyph('warn')} legacy clone  found {_short(legacy)} — a "
+              f"leftover pre-rename clone; not the live store, not deleted "
+              f"automatically. Remove it by hand once you've confirmed "
+              f"nothing still points at it.")
 
     # --- verdict -----------------------------------------------------------
     print()
@@ -1033,6 +1375,28 @@ def cmd_status(store):
             hook = "settings.json unreadable"
     print(f"  stop hook: {hook}")
 
+    # SessionStart store-pull hook (Claude Code)
+    pull_hook = "not wired — run `okfmem init`"
+    if os.path.exists(settings):
+        try:
+            with open(settings, "r", encoding="utf-8") as f:
+                sdata = json.load(f)
+            starts = (sdata.get("hooks", {}) or {}).get("SessionStart", []) or []
+            cmds = [h.get("command", "") for g in starts if isinstance(g, dict)
+                    for h in g.get("hooks", []) if isinstance(h, dict)]
+            if any(_is_managed_pull_command(c) for c in cmds):
+                pull_hook = "wired"
+            elif any(_is_legacy_pull_command(c) for c in cmds):
+                pull_hook = "STALE (legacy raw git pull — run `okfmem init` to heal)"
+        except (OSError, ValueError):
+            pull_hook = "settings.json unreadable"
+    print(f"  pull hook: {pull_hook}")
+
+    legacy_clone = detect_legacy_clone()
+    if legacy_clone:
+        print(f"  {glyph('warn')} legacy clone: {_short(legacy_clone)} "
+              f"(leftover pre-rename clone — not deleted automatically)")
+
     nudge = update_nudge()
     if nudge:
         print(f"\n  {glyph('chg')} {nudge}")
@@ -1052,7 +1416,8 @@ def main():
                          "(retirement-notice + review lines left untouched)")
     ap.add_argument("--no-hook", action="store_true",
                     help="do not auto-wire the Claude Code consolidation Stop "
-                         "hook into ~/.claude/settings.json")
+                         "hook or the SessionStart store-pull hook into "
+                         "~/.claude/settings.json")
     ap.add_argument("--store", default=os.environ.get(
         "OKFMEM_STORE", os.path.expanduser("~/okfmem-store")))
     args = ap.parse_args()
