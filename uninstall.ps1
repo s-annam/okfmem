@@ -5,6 +5,11 @@
     native PowerShell/cmd -- no WSL, no Git Bash required).
 
 .DESCRIPTION
+    Asks ONE up-front [y/N] confirmation before removing anything (default:
+    No -- abort). Pass -Yes to answer it unattended (scripts / CI); if no
+    prompt can be shown and -Yes was not given, the script aborts with
+    nothing removed. Then:
+
     1. Removes the okfmem.cmd / okfmem.ps1 CLI wrappers from
        %USERPROFILE%\.local\bin.
     2. Strips okfmem-managed harness wiring (pointer blocks, skill links/
@@ -17,11 +22,20 @@
        DELETE). Default: keep. Refuses entirely on a non-interactive run.
 
     Pass -DryRun to preview every step without changing anything: no wrapper
-    is removed, memory_uninstall.py runs with --dry-run, and both opt-in
+    is removed, memory_uninstall.py runs with --dry-run, and the confirmation
     prompts are described rather than shown.
 #>
 
-param([switch]$DryRun, [string]$Store)
+# [CmdletBinding()] makes PowerShell REJECT unknown parameters instead of
+# silently swallowing them into $args. Without it, a Unix-style `-Dry-run`
+# (single dash, inner hyphen) matches no parameter -- the hyphen breaks the
+# `-Dry` prefix match to -DryRun -- so it was dropped and the script ran FOR
+# REAL while the user believed they were previewing. With CmdletBinding it
+# fails fast: "A parameter cannot be found that matches parameter name
+# 'Dry-run'." and nothing mutates. The `--dry-run` typo is handled separately
+# below (it binds to positional -Store, which CmdletBinding leaves intact).
+[CmdletBinding()]
+param([switch]$DryRun, [switch]$Yes, [string]$Store)
 
 $ErrorActionPreference = "Stop"
 
@@ -35,12 +49,42 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-# "Interactive" for the gated prompts below means BOTH a real interactive
-# desktop session AND a non-redirected stdin -- the PowerShell analogue of
-# uninstall.sh's `[ -t 0 ]`. UserInteractive alone is $true on GitHub-hosted
-# Windows runners, so a piped/CI run would otherwise fall through to Read-Host
-# and hang; IsInputRedirected catches that and takes the documented skip.
-$Interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+# Windows PowerShell 5.1 has a second, distinct trap: with
+# $ErrorActionPreference = 'Stop', ANY stderr redirection on a native command
+# (2>$null or 2>&1) routes each stderr line through PowerShell's error stream,
+# and the FIRST line becomes a terminating NativeCommandError. So a probe that
+# legitimately fails ("no upstream configured for branch 'main'") killed the
+# script mid-check instead of returning non-zero. Run all git probes through
+# this helper, which relaxes EAP for the duration; callers still read
+# $LASTEXITCODE as usual (it is a global automatic variable and survives).
+function Invoke-GitQuiet {
+    param([string[]]$GitArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & git @GitArgs 2>$null
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+# Confirmation helper. Deliberately does NOT pre-detect interactivity:
+# [Console]::IsInputRedirected is $true in some real terminals (ConPTY hosts
+# pipe stdin), so `UserInteractive -and -not IsInputRedirected` classified a
+# genuine console as non-interactive and the prompts were never shown.
+# Read-Host itself is the ground truth: it prompts a human wherever a host UI
+# exists, throws under `powershell -NonInteractive` (-> 'unavailable'), and
+# returns '' on piped EOF (-> 'no', the safe default). Nothing can hang: EOF
+# returns immediately, and only an answer starting with y/Y is a yes.
+function Read-Confirm([string]$Prompt) {
+    try {
+        $ans = Read-Host $Prompt
+    } catch {
+        return 'unavailable'
+    }
+    if ($ans -match '^[Yy]') { return 'yes' }
+    return 'no'
+}
 
 # Guard against Unix-style double-dash flags. A user coming from uninstall.sh
 # may type `--dry-run`; PowerShell binds that unrecognized token to the
@@ -77,6 +121,28 @@ if (-not $PyCmd) {
     exit 1
 }
 
+# 0.5 Up-front confirmation gate --------------------------------------------
+# ONE [y/N] before anything is removed. "Uninstall" is a destructive-by-name
+# operation: the user must get to decline BEFORE step 1, not after. Covers the
+# CLI wrappers and the harness wiring (both restored by re-running
+# install.ps1). The store's git remote and data have their own gates below --
+# -Yes does NOT reach the data delete.
+if (-not $DryRun -and -not $Yes) {
+    switch (Read-Confirm "Uninstall okfmem (remove CLI wrappers and harness wiring)? [y/N]") {
+        'yes' { }
+        'unavailable' {
+            Write-Host "=> No interactive prompt available and -Yes not given -- aborting, nothing removed."
+            Write-Host "   Re-run in an interactive terminal to be asked, or pass -Yes to run unattended:"
+            Write-Host "     .\uninstall.ps1 -Yes"
+            exit 0
+        }
+        default {
+            Write-Host "=> Aborted -- nothing removed."
+            exit 0
+        }
+    }
+}
+
 # 1. Remove CLI wrappers ----------------------------------------------------
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
 $CmdPath = Join-Path $BinDir "okfmem.cmd"
@@ -96,14 +162,18 @@ if ($Wrappers) {
 }
 
 # 2. Strip okfmem-managed harness wiring ------------------------------------
-# Running this uninstaller IS the user's consent to remove what okfmem itself
-# wired. Never touches user content it didn't create, and never touches the
-# store's data or git remote (gated separately below).
-Write-Host "=> Removing harness wiring (pointers, skill links, hooks)..."
+# Covered by the up-front gate above (rung-2 consent already given -- via
+# prompt or explicit -Yes). Reversible by re-running install.ps1, and
+# memory_uninstall.py only ever touches wiring okfmem itself created -- it
+# skips any real file it didn't write. The store's data and git remote are
+# never touched here (gated separately below).
+$UninstallPy = Join-Path $EngineDir "memory_uninstall.py"
 if ($DryRun) {
-    & $PyCmd (Join-Path $EngineDir "memory_uninstall.py") --dry-run --store "$StoreDir"
+    Write-Host "=> [dry-run] would remove harness wiring (pointers, skill links, hooks):"
+    & $PyCmd $UninstallPy --dry-run --store "$StoreDir"
 } else {
-    & $PyCmd (Join-Path $EngineDir "memory_uninstall.py") --store "$StoreDir"
+    Write-Host "=> Removing harness wiring (pointers, skill links, hooks)..."
+    & $PyCmd $UninstallPy --store "$StoreDir"
 }
 
 # 3. Delink the store remote (opt-in, rung-2) -------------------------------
@@ -113,24 +183,19 @@ if ($DryRun) {
 $HasRemote = $false
 $OriginUrl = $null
 if (Test-Path -LiteralPath $StoreDir) {
-    $OriginUrl = (git -C "$StoreDir" remote get-url origin 2>$null)
+    $OriginUrl = (Invoke-GitQuiet @('-C', $StoreDir, 'remote', 'get-url', 'origin'))
     if ($LASTEXITCODE -eq 0 -and $OriginUrl) { $HasRemote = $true }
 }
 if ($HasRemote) {
     if ($DryRun) {
         Write-Host "=> [dry-run] store has a remote ($OriginUrl) -- would offer to delink (default: keep)."
-    } elseif ($Interactive) {
-        $ans = Read-Host "Store has a remote ($OriginUrl). Delink it (git remote remove origin)? [y/N]"
-        if ($ans -match '^[Yy]') {
-            git -C "$StoreDir" remote remove origin 2>&1 | Out-Null
-            Write-Host "=> Remote delinked. Store data is untouched."
-        } else {
-            Write-Host "   Skipped. Delink later with:"
-            Write-Host "     git -C $StoreDir remote remove origin"
-        }
+    } elseif ((Read-Confirm "Store has a remote ($OriginUrl). Delink it (git remote remove origin)? [y/N]") -eq 'yes') {
+        Invoke-GitQuiet @('-C', $StoreDir, 'remote', 'remove', 'origin') | Out-Null
+        Write-Host "=> Remote delinked. Store data is untouched."
     } else {
-        Write-Host "=> Store has a remote ($OriginUrl) -- skipped (non-interactive)."
-        Write-Host "   Delink later with:  git -C $StoreDir remote remove origin"
+        # Declined, or no prompt was available ('no'/'unavailable' both keep).
+        Write-Host "   Skipped. Delink later with:"
+        Write-Host "     git -C $StoreDir remote remove origin"
     }
 } else {
     if (Test-Path -LiteralPath $StoreDir) {
@@ -147,39 +212,70 @@ if (-not (Test-Path -LiteralPath $StoreDir)) {
     Write-Host "=> No store found at $StoreDir -- nothing to delete."
 } elseif ($DryRun) {
     Write-Host "=> [dry-run] would offer to delete all data at $StoreDir (double-confirm; default: keep)."
-} elseif (-not $Interactive) {
-    Write-Host "=> Store data at $StoreDir was NOT deleted (non-interactive run)."
-    Write-Host "   Delete it yourself if you're sure:  Remove-Item -Recurse -Force `"$StoreDir`""
 } else {
     Write-Host ""
     Write-Host "Store data lives at: $StoreDir"
 
-    $UnpushedWarning = $false
-    $UnpushedCount = 0
-    git -C "$StoreDir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>$null | Out-Null
+    # Pending-work checks so the user sees what deleting would actually lose.
+    # Three independent ways a store can hold data that exists nowhere else:
+    #   (a) committed but unpushed  -> rev-list @{u}..HEAD
+    #   (b) commits but NO upstream -> nothing is backed up at all
+    #   (c) uncommitted / untracked -> dirty working tree (unsaved edits)
+    # (a) alone was checked before; (b) and (c) could be lost silently.
+    $LossWarning = $false
+    Invoke-GitQuiet @('-C', $StoreDir, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}') | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        $countOut = (git -C "$StoreDir" rev-list --count '@{u}..HEAD' 2>$null)
+        $countOut = (Invoke-GitQuiet @('-C', $StoreDir, 'rev-list', '--count', '@{u}..HEAD'))
         if ($LASTEXITCODE -eq 0 -and $countOut) {
-            $UnpushedCount = [int]($countOut.Trim())
-            if ($UnpushedCount -gt 0) { $UnpushedWarning = $true }
+            $UnpushedCount = [int]("$countOut".Trim())
+            if ($UnpushedCount -gt 0) {
+                Write-Host "Warning: $UnpushedCount commit(s) not yet pushed to the remote."
+                $LossWarning = $true
+            }
+        }
+    } else {
+        Invoke-GitQuiet @('-C', $StoreDir, 'rev-parse', 'HEAD') | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Warning: store has commits but no upstream remote -- nothing is backed up."
+            $LossWarning = $true
         }
     }
-    if ($UnpushedWarning) {
-        Write-Host "Warning: $StoreDir has $UnpushedCount unpushed commit(s)."
+    $dirty = (Invoke-GitQuiet @('-C', $StoreDir, 'status', '--porcelain'))
+    if ($dirty) {
+        Write-Host "Warning: store has uncommitted or untracked changes (unsaved memory edits)."
+        $LossWarning = $true
+    }
+    if ($LossWarning) {
         Write-Host "  Deleting now would lose that memory data with no backup."
     }
 
-    $ans = Read-Host "Delete ALL memory data at $StoreDir? [y/N]"
-    if ($ans -match '^[Yy]') {
-        $confirm = Read-Host "Type the store path (or DELETE) to confirm"
-        if ($confirm -eq $StoreDir -or $confirm -ceq "DELETE") {
-            Remove-Item -Recurse -Force -Confirm:$false -LiteralPath $StoreDir
-            Write-Host "=> Deleted $StoreDir."
-        } else {
-            Write-Host "=> Confirmation did not match -- aborted. Data intact."
+    # ${} braces required: `?` is a legal variable-name char in Windows
+    # PowerShell 5.1, so "$StoreDir?" reads the undefined variable `StoreDir?`
+    # and the prompt printed with no path at all.
+    switch (Read-Confirm "Delete ALL memory data at ${StoreDir}? [y/N]") {
+        'yes' {
+            # Second, typed rung-3 confirmation. If the host can't prompt here
+            # (throws), that is a refusal -- data stays.
+            $confirm = $null
+            try {
+                $confirm = Read-Host "Type the store path (or DELETE) to confirm"
+            } catch {
+                $confirm = $null
+            }
+            if ($confirm -eq $StoreDir -or $confirm -ceq "DELETE") {
+                Remove-Item -Recurse -Force -Confirm:$false -LiteralPath $StoreDir
+                Write-Host "=> Deleted $StoreDir."
+            } else {
+                Write-Host "=> Confirmation did not match -- aborted. Data intact."
+            }
         }
-    } else {
-        Write-Host "=> Skipped. Data intact at $StoreDir."
+        'unavailable' {
+            Write-Host "=> Store data at $StoreDir was NOT deleted (no prompt available)."
+            Write-Host "   Delete it yourself if you're sure:  Remove-Item -Recurse -Force `"$StoreDir`""
+        }
+        default {
+            Write-Host "=> Skipped. Data intact at $StoreDir."
+        }
     }
 }
 

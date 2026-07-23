@@ -50,6 +50,7 @@ Guards:
 
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
+
 import argparse
 import os
 import re
@@ -64,8 +65,9 @@ LOCK_STALE_SECONDS = 600  # 10 minutes
 
 
 def _git(store, *args, timeout=120):
-    return subprocess.run(["git", "-C", store, *args],
-                          capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        ["git", "-C", store, *args], capture_output=True, text=True, timeout=timeout
+    )
 
 
 def _git_dir(store):
@@ -141,11 +143,11 @@ def _pid_alive(pid):
         os.kill(pid, 0)
         return True
     except ProcessLookupError:
-        return False          # no such process — genuinely gone
+        return False  # no such process — genuinely gone
     except PermissionError:
-        return True           # exists but owned by another user
+        return True  # exists but owned by another user
     except OSError:
-        return None           # can't determine — defer to age
+        return None  # can't determine — defer to age
 
 
 def _acquire_lock(store, timeout=60):
@@ -178,8 +180,7 @@ def _acquire_lock(store, timeout=60):
             # yields no PID, so age alone decides.
             age = _lock_age(path)
             owner_alive = _pid_alive(_lock_owner_pid(path))
-            if (age is not None and age > LOCK_STALE_SECONDS
-                    and owner_alive is not True):
+            if age is not None and age > LOCK_STALE_SECONDS and owner_alive is not True:
                 try:
                     os.remove(path)
                     continue  # broke it — retry acquisition immediately
@@ -210,8 +211,9 @@ def _rebase_in_progress(store):
             git_dir = os.path.join(store, git_dir)
     if git_dir is None:
         git_dir = os.path.join(store, ".git")
-    return (os.path.isdir(os.path.join(git_dir, "rebase-merge"))
-            or os.path.isdir(os.path.join(git_dir, "rebase-apply")))
+    return os.path.isdir(os.path.join(git_dir, "rebase-merge")) or os.path.isdir(
+        os.path.join(git_dir, "rebase-apply")
+    )
 
 
 _UNMERGED_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
@@ -246,8 +248,7 @@ def _unmerged_paths(store):
 # form (e.g. nested under `metadata:` on older pages). Optionally quoted. Value
 # must start with a digit so non-timestamps (`modified: null`) fall through to
 # the git-time fallback / abort path.
-_FRONTMATTER_MODIFIED = re.compile(
-    r"^\s*modified:\s*[\"']?(\d[^\s\"']*)", re.MULTILINE)
+_FRONTMATTER_MODIFIED = re.compile(r"^\s*modified:\s*[\"']?(\d[^\s\"']*)", re.MULTILINE)
 
 
 def _state_modified_ts(text):
@@ -404,8 +405,9 @@ def _finish_rebase_with_state_autoresolve(store, prefer_local):
             if "--skip" in blob and not _unmerged_paths(store):
                 # The resolved pick became empty (incoming side won and the
                 # commit carried nothing else) — old-git stops; drop it.
-                if (_git(store, "rebase", "--skip").returncode != 0
-                        and not _unmerged_paths(store)):
+                if _git(
+                    store, "rebase", "--skip"
+                ).returncode != 0 and not _unmerged_paths(store):
                     return False
             elif not _unmerged_paths(store):
                 return False  # failed for some non-conflict reason — unwind
@@ -440,8 +442,14 @@ def sync_store(store, message, do_push=True, do_pull=True):
     can tell the user to resolve `~/okfmem-store` by hand.
     """
     store = os.path.abspath(os.path.expanduser(store))
-    res = {"committed": False, "sha": None, "pushed": False,
-           "reason": "", "push_error": None, "conflict": False}
+    res = {
+        "committed": False,
+        "sha": None,
+        "pushed": False,
+        "reason": "",
+        "push_error": None,
+        "conflict": False,
+    }
 
     lock = _acquire_lock(store)
     if lock is None:
@@ -457,8 +465,10 @@ def sync_store(store, message, do_push=True, do_pull=True):
         # pull sub-step below — the pull block is skipped on do_push=False /
         # offline / already-current, but the stage+commit path is not.
         if _rebase_in_progress(store):
-            res["reason"] = ("a rebase is already in progress in the store; "
-                             "skipped (resolve ~/okfmem-store by hand).")
+            res["reason"] = (
+                "a rebase is already in progress in the store; "
+                "skipped (resolve ~/okfmem-store by hand)."
+            )
             return res
 
         # Pull-before-commit (#26): fold in remote changes BEFORE staging/
@@ -472,8 +482,10 @@ def sync_store(store, message, do_push=True, do_pull=True):
                 upstream = _git(store, "rev-parse", "@{u}")
                 if upstream.returncode == 0:
                     local = _git(store, "rev-parse", "HEAD")
-                    if (local.returncode == 0
-                            and local.stdout.strip() != upstream.stdout.strip()):
+                    if (
+                        local.returncode == 0
+                        and local.stdout.strip() != upstream.stdout.strip()
+                    ):
                         # A pre-existing rebase-in-progress was already caught
                         # by the early return at the top of the try, so the
                         # tree is clean here and this pull's own rebase is safe.
@@ -487,13 +499,15 @@ def sync_store(store, message, do_push=True, do_pull=True):
                             # durable page or MEMORY.md falls through to
                             # the normal abort so a human reconciles it.
                             if not _finish_rebase_with_state_autoresolve(
-                                    store, prefer_local=True):
+                                store, prefer_local=True
+                            ):
                                 _git(store, "rebase", "--abort")
                                 res["conflict"] = True
                                 res["reason"] = (
                                     "pull --rebase conflict before commit — "
                                     "resolve ~/okfmem-store by hand; "
-                                    "NOT committed, NOT pushed.")
+                                    "NOT committed, NOT pushed."
+                                )
                                 return res
                         if _has_unmerged_paths(store):
                             # The rebase completed (branch moved), but
@@ -507,8 +521,7 @@ def sync_store(store, message, do_push=True, do_pull=True):
                             # pre-rebase commit, and the stash (never
                             # dropped because the pop conflicted)
                             # re-applies cleanly there.
-                            if _auto_resolve_state_conflicts(
-                                    store, prefer_local=True):
+                            if _auto_resolve_state_conflicts(store, prefer_local=True):
                                 _git(store, "stash", "drop")
                             else:
                                 _git(store, "reset", "--hard", "ORIG_HEAD")
@@ -517,7 +530,8 @@ def sync_store(store, message, do_push=True, do_pull=True):
                                 res["reason"] = (
                                     "pull --rebase conflict before commit — "
                                     "resolve ~/okfmem-store by hand; "
-                                    "NOT committed, NOT pushed.")
+                                    "NOT committed, NOT pushed."
+                                )
                                 return res
                 # no upstream configured — nothing to integrate, fall through.
             # fetch failure (offline) is swallowed — fall through and commit
@@ -530,8 +544,7 @@ def sync_store(store, message, do_push=True, do_pull=True):
         if has_changes:
             c = _git(store, "commit", "-m", message)
             if c.returncode != 0:
-                res["reason"] = (c.stdout.strip() or c.stderr.strip()
-                                 or "commit failed.")
+                res["reason"] = c.stdout.strip() or c.stderr.strip() or "commit failed."
                 return res
             res["committed"] = True
             sha = _git(store, "rev-parse", "--short", "HEAD")
@@ -553,11 +566,13 @@ def sync_store(store, message, do_push=True, do_pull=True):
             # newly staged, and returning here would strand it locally.
             head = _git(store, "rev-parse", "HEAD")
             upstream = _git(store, "rev-parse", "@{u}")
-            if (head.returncode != 0 or upstream.returncode != 0
-                    or head.stdout.strip() == upstream.stdout.strip()):
+            if (
+                head.returncode != 0
+                or upstream.returncode != 0
+                or head.stdout.strip() == upstream.stdout.strip()
+            ):
                 return res
-            res["reason"] = ("no new changes; pushing existing unpushed "
-                             "local commit(s).")
+            res["reason"] = "no new changes; pushing existing unpushed local commit(s)."
 
         p = _git(store, "push")
         if p.returncode == 0:
@@ -571,16 +586,41 @@ def sync_store(store, message, do_push=True, do_pull=True):
 
 def main():
     ap = argparse.ArgumentParser(description="Commit + push the okfmem store.")
-    ap.add_argument("--store", default=os.environ.get("OKFMEM_STORE",
-                    os.path.expanduser("~/okfmem-store")))
-    ap.add_argument("-m", "--message", required=True, help="commit subject")
+    ap.add_argument(
+        "--store",
+        default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")),
+    )
+    ap.add_argument("-m", "--message", help="commit subject (prompted for if omitted)")
     ap.add_argument("--no-push", action="store_true", help="commit but don't push")
-    ap.add_argument("--no-pull", action="store_true",
-                    help="don't pull --rebase before push (single-machine)")
+    ap.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="don't pull --rebase before push (single-machine)",
+    )
     args = ap.parse_args()
 
-    res = sync_store(args.store, args.message,
-                     do_push=not args.no_push, do_pull=not args.no_pull)
+    # A bare `okfmem sync` shouldn't be a usage error -- ask for the subject,
+    # offering a timestamped default so Enter alone works. input() is the
+    # ground truth for interactivity (not a pre-detected isatty guess): on a
+    # non-interactive stdin it raises EOFError immediately, and the documented
+    # default is taken so piped/unattended callers keep working. Ctrl+C aborts
+    # before anything is committed. In-process callers (memory_consolidate)
+    # pass `message` to sync_store directly and never reach this.
+    message = args.message
+    if not message:
+        default = "okfmem sync " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            answer = input(f"Commit message [{default}]: ").strip()
+        except EOFError:
+            answer = ""  # no interactive stdin -- take the default
+        except KeyboardInterrupt:
+            print("\nokfmem sync: aborted -- nothing committed.")
+            sys.exit(130)
+        message = answer or default
+
+    res = sync_store(
+        args.store, message, do_push=not args.no_push, do_pull=not args.no_pull
+    )
     print(f"okfmem sync: {res['reason']}")
     if res["pushed"]:
         print("  pushed.")

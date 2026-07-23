@@ -74,7 +74,7 @@ okfmem status                 # store + per-project page/archive counts, sync + 
 okfmem backfill  --dry-run    # stamp decay frontmatter on existing pages
 okfmem init      --dry-run    # pointers + registry wiring
 okfmem consolidate --dry-run  # decay + archive stale pages + push
-okfmem sync -m "<msg>"        # commit + pull-rebase + push the store
+okfmem sync [-m "<msg>"]      # commit + pull-rebase + push the store (prompts for the message if -m omitted)
 
 python3 scripts/check-leaks.py   # leak gate (also runs first in CI)
 ruff check .                     # lint (advisory in CI today)

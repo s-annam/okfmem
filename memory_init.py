@@ -32,6 +32,7 @@ Does five things:
 
 Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
+
 import argparse
 import json
 import os
@@ -45,13 +46,22 @@ import time
 # ---------------------------------------------------------------------------
 # Output formatting — TTY-gated color + status glyphs, ASCII-safe when piped
 # ---------------------------------------------------------------------------
-_ANSI = {"reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
-         "green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}
+_ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "red": "\033[31m",
+}
 
 
 def _use_color():
-    return (sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
-            and os.environ.get("TERM") != "dumb")
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("NO_COLOR") is None
+        and os.environ.get("TERM") != "dumb"
+    )
 
 
 def _c(s, style):
@@ -59,9 +69,11 @@ def _c(s, style):
 
 
 # kind -> (unicode glyph, ascii fallback, color)
-_GLYPH = {"ok": ("✓", "ok", "green"),
-          "chg": ("~", "~", "yellow"),
-          "warn": ("!", "!", "red")}
+_GLYPH = {
+    "ok": ("✓", "ok", "green"),
+    "chg": ("~", "~", "yellow"),
+    "warn": ("!", "!", "red"),
+}
 
 
 def glyph(kind):
@@ -73,13 +85,19 @@ def glyph(kind):
 def _short(path):
     """Collapse the home prefix to ~ for compact, portable-looking paths."""
     home = os.path.expanduser("~")
-    return "~" + path[len(home):] if path == home or path.startswith(home + os.sep) else path
+    return (
+        "~" + path[len(home) :]
+        if path == home or path.startswith(home + os.sep)
+        else path
+    )
 
 
 # ---------------------------------------------------------------------------
 # Managed pointer block
 # ---------------------------------------------------------------------------
-MARKER_OPEN = "<!-- MEMORY-POINTER v1 (managed by memory-init — do not edit between markers) -->"
+MARKER_OPEN = (
+    "<!-- MEMORY-POINTER v1 (managed by memory-init — do not edit between markers) -->"
+)
 MARKER_CLOSE = "<!-- /MEMORY-POINTER -->"
 
 POINTER_BODY = """## Memory
@@ -108,21 +126,28 @@ GITIGNORE_MARKER_CLOSE = "# END okfmem-managed"
 
 GITIGNORE_LINES = (".okfmem-sync.lock", "*.db", "__pycache__/", "*.pyc", ".DS_Store")
 
-GITIGNORE_BODY = ("# okfmem per-machine runtime / rebuildable -- never synced\n"
-                  + "\n".join(GITIGNORE_LINES))
+GITIGNORE_BODY = (
+    "# okfmem per-machine runtime / rebuildable -- never synced\n"
+    + "\n".join(GITIGNORE_LINES)
+)
 
 GITIGNORE_BLOCK = f"{GITIGNORE_MARKER_OPEN}\n{GITIGNORE_BODY}\n{GITIGNORE_MARKER_CLOSE}"
 
 # Retired-system references the cleanup pass looks for. The ONLY legitimate
 # surviving mention is the retirement-notice sentence in ~/.claude/CLAUDE.md.
 STALE_PATTERNS = [
-    r"\bclaude-memory\b",                       # renamed to okfmem-store
+    r"\bclaude-memory\b",  # renamed to okfmem-store
     r"\bmemgraph\b",
-    r"\bread_graph\b", r"\bsearch_nodes\b",
-    r"\bcreate_entities\b", r"\badd_observations\b",
-    r"\bprojector\b", r"\bpush-primer\b",
+    r"\bread_graph\b",
+    r"\bsearch_nodes\b",
+    r"\bcreate_entities\b",
+    r"\badd_observations\b",
+    r"\bprojector\b",
+    r"\bpush-primer\b",
     r"source:\s*graph",
-    r"\bcontext-keeper\b", r"/ck:save", r"\bcontext\.json\b",
+    r"\bcontext-keeper\b",
+    r"/ck:save",
+    r"\bcontext\.json\b",
     r"\bck/contexts\b",
 ]
 STALE_RE = re.compile("|".join(STALE_PATTERNS), re.IGNORECASE)
@@ -135,15 +160,15 @@ CLAUDE_MEMORY_RE = re.compile(r"claude-memory")
 # A line that mentions a retired system only to say it is retired is a
 # *notice* (tells agents to ignore leftovers) — same class as the preserved
 # sentence in ~/.claude/CLAUDE.md. Never rewrite these.
-NOTICE_RE = re.compile(r"retire|do not use|no longer|removed|deprecat",
-                       re.IGNORECASE)
+NOTICE_RE = re.compile(r"retire|do not use|no longer|removed|deprecat", re.IGNORECASE)
 
 
 def classify_line(text):
     """'path' = safe claude-memory→okfmem-store swap; 'notice' = leave as-is;
     'review' = flagged but needs a human (never auto-edited)."""
     if NOTICE_RE.search(text) and not (
-            CLAUDE_MEMORY_RE.search(text) and "okfmem-store" not in text):
+        CLAUDE_MEMORY_RE.search(text) and "okfmem-store" not in text
+    ):
         return "notice"
     if CLAUDE_MEMORY_RE.search(text):
         return "path"
@@ -159,9 +184,11 @@ def detect_harnesses():
     gemini_dir = os.path.join(home, ".gemini")
     return {
         "claude_code": os.path.join(claude_dir, "CLAUDE.md")
-        if os.path.isdir(claude_dir) else None,
+        if os.path.isdir(claude_dir)
+        else None,
         "antigravity": os.path.join(gemini_dir, "config", "AGENTS.md")
-        if (os.path.isdir(gemini_dir) or shutil.which("agy")) else None,
+        if (os.path.isdir(gemini_dir) or shutil.which("agy"))
+        else None,
     }
 
 
@@ -253,8 +280,8 @@ def encode_root(root):
 # ---------------------------------------------------------------------------
 def build_registry(store, claude_projects):
     """Return (registry_dict, drift_notes) from the memory symlinks."""
-    mapping = {}          # abs git-root -> project
-    overrides = {}        # subset where project != basename(root)
+    mapping = {}  # abs git-root -> project
+    overrides = {}  # subset where project != basename(root)
     drift = []
     if not os.path.isdir(claude_projects):
         drift.append(f"no Claude Code projects dir at {claude_projects}")
@@ -337,6 +364,7 @@ def _merge_registry(existing, derived):
 
     Within local scope this run stays authoritative: a native root that is no
     longer symlinked gets dropped, exactly as the old rebuild-from-scratch did."""
+
     def merge_section(key):
         out = {}
         # Preserve foreign entries -- another machine's native paths.
@@ -372,8 +400,10 @@ def write_registry(store, reg, dry_run):
     path = os.path.join(store, "registry.json")
     existing = _load_registry(path)
     merged = _merge_registry(existing, reg)
-    same = (existing.get("map", {}) == merged["map"]
-            and existing.get("overrides", {}) == merged["overrides"])
+    same = (
+        existing.get("map", {}) == merged["map"]
+        and existing.get("overrides", {}) == merged["overrides"]
+    )
     # A missing file must be created even when the mapping is empty (bootstrap);
     # otherwise only a genuine mapping change triggers a (normalized) write.
     changed = (not os.path.exists(path)) or (not same)
@@ -401,8 +431,11 @@ def upsert_pointer(path, dry_run):
         new_text = block_re.sub(POINTER_BLOCK, existing)
         action = "unchanged" if new_text == existing else "updated"
     else:
-        sep = "" if existing == "" or existing.endswith("\n\n") else (
-            "\n" if existing.endswith("\n") else "\n\n")
+        sep = (
+            ""
+            if existing == "" or existing.endswith("\n\n")
+            else ("\n" if existing.endswith("\n") else "\n\n")
+        )
         new_text = existing + sep + POINTER_BLOCK + "\n"
         action = "inserted"
 
@@ -440,8 +473,11 @@ def ensure_store_gitignore(path, dry_run):
         new_text = block_re.sub(GITIGNORE_BLOCK, existing)
         action = "unchanged" if new_text == existing else "updated"
     else:
-        sep = "" if existing == "" or existing.endswith("\n\n") else (
-            "\n" if existing.endswith("\n") else "\n\n")
+        sep = (
+            ""
+            if existing == "" or existing.endswith("\n\n")
+            else ("\n" if existing.endswith("\n") else "\n\n")
+        )
         new_text = existing + sep + GITIGNORE_BLOCK + "\n"
         action = "created" if existing == "" else "appended"
 
@@ -456,8 +492,16 @@ def ensure_store_gitignore(path, dry_run):
 # Stale-reference scan (detection only unless --apply-cleanup)
 # ---------------------------------------------------------------------------
 CLEANUP_FILES = ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md")
-CLEANUP_SKIP_DIRS = {".git", "node_modules", ".venv", "venv",
-                     "__pycache__", "dist", "build", ".next"}
+CLEANUP_SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
+}
 
 
 def _scan_one(real, findings, seen, fpath):
@@ -469,8 +513,11 @@ def _scan_one(real, findings, seen, fpath):
             lines = f.readlines()
     except OSError:
         return
-    hits = [(i + 1, ln.rstrip("\n"), classify_line(ln))
-            for i, ln in enumerate(lines) if STALE_RE.search(ln)]
+    hits = [
+        (i + 1, ln.rstrip("\n"), classify_line(ln))
+        for i, ln in enumerate(lines)
+        if STALE_RE.search(ln)
+    ]
     if hits:
         findings.append((fpath, hits))
 
@@ -520,8 +567,7 @@ def apply_path_rewrites(findings, dry_run):
         changed = False
         for ln in path_linenos:
             if 1 <= ln <= len(lines) and "claude-memory" in lines[ln - 1]:
-                lines[ln - 1] = lines[ln - 1].replace("claude-memory",
-                                                      "okfmem-store")
+                lines[ln - 1] = lines[ln - 1].replace("claude-memory", "okfmem-store")
                 lines_changed += 1
                 changed = True
         if changed:
@@ -629,8 +675,12 @@ def _make_link(target, link):
     # them internally — a target containing spaces can still trip cmd's own
     # tokenizer. Skill dirs under ~/.claude live in space-free paths today.
     try:
-        subprocess.run(["cmd", "/c", "mklink", "/J", link, target],
-                       capture_output=True, text=True, check=True)
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", link, target],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         return "junction"
     except (OSError, subprocess.CalledProcessError):
         pass
@@ -639,8 +689,7 @@ def _make_link(target, link):
     # update) instead of a user's real directory.
     shutil.copytree(target, link)
     try:
-        with open(os.path.join(link, MANAGED_COPY_MARKER), "w",
-                  encoding="utf-8") as f:
+        with open(os.path.join(link, MANAGED_COPY_MARKER), "w", encoding="utf-8") as f:
             f.write(target + "\n")
     except OSError:
         pass  # marker is best-effort; a copy without it just degrades to
@@ -658,8 +707,7 @@ def _managed_copy_target(link):
     if os.path.islink(link) or not os.path.isdir(link):
         return None
     try:
-        with open(os.path.join(link, MANAGED_COPY_MARKER), "r",
-                  encoding="utf-8") as f:
+        with open(os.path.join(link, MANAGED_COPY_MARKER), "r", encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return None
@@ -678,12 +726,14 @@ def _link_matches_target(link, target):
         # string-equals the plain target, which would repoint every single run.
         # realpath + normcase is correct on both platforms (and case-insensitive
         # on Windows).
-        return os.path.normcase(os.path.realpath(link)) == \
-            os.path.normcase(os.path.realpath(target))
+        return os.path.normcase(os.path.realpath(link)) == os.path.normcase(
+            os.path.realpath(target)
+        )
     if os.path.isdir(link):
         if _is_junction(link):
-            return os.path.normcase(os.path.realpath(link)) == \
-                os.path.normcase(os.path.realpath(target))
+            return os.path.normcase(os.path.realpath(link)) == os.path.normcase(
+                os.path.realpath(target)
+            )
         # Plain directory: a managed tier-3 copy (see _managed_copy_target).
         # Treat "same SKILL.md bytes" as "matches" — an engine update changes
         # those bytes, which correctly reports a mismatch so the caller
@@ -712,8 +762,11 @@ def link_skills(dry_run):
     actions = []
     if not os.path.isdir(engine):
         return actions
-    names = sorted(n for n in os.listdir(engine)
-                   if os.path.isfile(os.path.join(engine, n, "SKILL.md")))
+    names = sorted(
+        n
+        for n in os.listdir(engine)
+        if os.path.isfile(os.path.join(engine, n, "SKILL.md"))
+    )
     for harness, dest in skill_dirs().items():
         if not dry_run:
             os.makedirs(dest, exist_ok=True)
@@ -724,8 +777,11 @@ def link_skills(dry_run):
             # junction, or a tier-3 copy identified by its marker (regardless
             # of whether its contents still match — that's how a stale copy
             # gets re-copied instead of misfiled as a user's real file).
-            is_managed = (os.path.islink(link) or _is_junction(link)
-                          or _managed_copy_target(link) is not None)
+            is_managed = (
+                os.path.islink(link)
+                or _is_junction(link)
+                or _managed_copy_target(link) is not None
+            )
             if is_managed:
                 if _link_matches_target(link, target):
                     actions.append((harness, name, "ok"))
@@ -744,8 +800,10 @@ def link_skills(dry_run):
                         os.remove(link)
                     tier = _make_link(target, link)
                     if tier == "copy":
-                        action = ("repoint (copy — will go stale; re-run "
-                                  "okfmem init after engine updates)")
+                        action = (
+                            "repoint (copy — will go stale; re-run "
+                            "okfmem init after engine updates)"
+                        )
                     elif tier != "symlink":
                         action = f"repoint ({tier})"
             elif os.path.exists(link):
@@ -758,8 +816,10 @@ def link_skills(dry_run):
                     if tier == "junction":
                         action = "link (junction)"
                     elif tier == "copy":
-                        action = ("link (copy — will go stale; re-run "
-                                  "okfmem init after engine updates)")
+                        action = (
+                            "link (copy — will go stale; re-run "
+                            "okfmem init after engine updates)"
+                        )
             actions.append((harness, name, action))
     return actions
 
@@ -773,25 +833,29 @@ def _current_git_root():
         # Force C locale so the "not a git repository" match below is reliable
         # regardless of the user's git locale -- otherwise the ordinary
         # not-in-a-repo case prints a spurious diagnostic on a non-English box.
-        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                              capture_output=True, text=True,
-                              env={**os.environ, "LC_ALL": "C"})
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
     except OSError as e:
         # git missing from PATH / not executable -- a real failure, not the
         # ordinary "cwd isn't a repo" case. Surface it so it isn't silently
         # misreported downstream as "not inside a git repo".
-        print(f"okfmem: could not run git to find the repo root: {e}",
-              file=sys.stderr)
+        print(f"okfmem: could not run git to find the repo root: {e}", file=sys.stderr)
         return None
     if out.returncode != 0:
         stderr = (out.stderr or "").strip()
         # rc 128 + "not a git repository" is the expected not-in-a-repo case
         # (e.g. installer launched from ~) -- stay quiet, callers report a
         # clean skip. Anything else is unexpected: surface rc + stderr.
-        if not (out.returncode == 128
-                and "not a git repository" in stderr.lower()):
-            print(f"okfmem: git rev-parse failed (rc={out.returncode}): "
-                  f"{stderr or 'no stderr'}", file=sys.stderr)
+        if not (out.returncode == 128 and "not a git repository" in stderr.lower()):
+            print(
+                f"okfmem: git rev-parse failed (rc={out.returncode}): "
+                f"{stderr or 'no stderr'}",
+                file=sys.stderr,
+            )
         return None
     return os.path.normpath(out.stdout.strip())
 
@@ -856,8 +920,9 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
         # on nearly every run. Repoint only when the copy points at a different
         # project (rename/move); the "will go stale; re-run init" note carries
         # the content-refresh expectation for this rare last-resort tier.
-        if os.path.normcase(os.path.realpath(managed_copy)) == \
-                os.path.normcase(target_real):
+        if os.path.normcase(os.path.realpath(managed_copy)) == os.path.normcase(
+            target_real
+        ):
             # A copy is a frozen snapshot, not a live link: pages added to the
             # store since it was made are NOT reflected, and (unlike a target
             # rename) init won't re-copy while the target matches. Flag it so
@@ -867,8 +932,10 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
         verb = "repoint"
     elif os.path.isdir(link):
         if os.listdir(link):
-            return ("skip", "non-empty directory already at the memory link "
-                             "path — resolve by hand")
+            return (
+                "skip",
+                "non-empty directory already at the memory link path — resolve by hand",
+            )
         verb = "link"  # empty placeholder dir left by the harness -- nothing
         # was pointed before, so "linked to X" reads correctly (not "repointed").
         # The "empty real directory" case this issue exists for; safe to replace.
@@ -895,8 +962,7 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
     elif tier == "junction":
         tier_note = " (junction)"
     else:
-        tier_note = (" (copy — will go stale; re-run okfmem init after "
-                      "engine updates)")
+        tier_note = " (copy — will go stale; re-run okfmem init after engine updates)"
     return ("changed", f"{verb}ed to {name}{tier_note}")
 
 
@@ -999,7 +1065,8 @@ _LEGACY_STORE_NAMES = r"(?:claude-memory|okfmem-store|okfmem[\\/]store)"
 _LEGACY_PULL_RE = re.compile(
     r"\bgit\b.*-C\s+[\"']?[^\"'\s]*" + _LEGACY_STORE_NAMES + r"[^\"'\s]*"
     r"[\"']?.*\bpull\b",
-    re.IGNORECASE)
+    re.IGNORECASE,
+)
 # Any `git ... pull` in a single segment, store-named or not — used to detect
 # an unrelated pull we must NOT clobber.
 _ANY_GIT_PULL_RE = re.compile(r"\bgit\b.*\bpull\b", re.IGNORECASE)
@@ -1163,8 +1230,7 @@ def _prompt_yes_no(question, *, assume_yes, non_interactive, manual_hint):
     if assume_yes:
         return True
     if non_interactive:
-        print(f"{glyph('ok')} {question}\n    skipped (non-interactive). "
-              f"{manual_hint}")
+        print(f"{glyph('ok')} {question}\n    skipped (non-interactive). {manual_hint}")
         return False
     try:
         ans = input(f"{question} [y/N] ").strip().lower()
@@ -1178,8 +1244,9 @@ def _prompt_yes_no(question, *, assume_yes, non_interactive, manual_hint):
     return False
 
 
-def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
-            assume_yes=False):
+def cmd_run(
+    store, dry_run, apply_cleanup, verbose=False, wire_hook=True, assume_yes=False
+):
     """Wire the store into every harness and report the result.
 
     Output is quiet-by-default: each of the five steps prints ONE status line
@@ -1221,8 +1288,11 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
     else:
         apply_config = _prompt_yes_no(
             "Wire okfmem into ~/.claude (hooks, harness pointers, and skill/"
-            "memory links)?", assume_yes=assume_yes,
-            non_interactive=not sys.stdin.isatty(), manual_hint=config_hint)
+            "memory links)?",
+            assume_yes=assume_yes,
+            non_interactive=not sys.stdin.isatty(),
+            manual_hint=config_hint,
+        )
 
     # --- 1b. memory link (current repo) ------------------------------------
     # Runs BEFORE the registry step, on the registry as it exists on disk,
@@ -1231,8 +1301,9 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
     # sees it and reports the project as linked, with no second `init` needed.
     if apply_config:
         existing_reg = _load_registry(os.path.join(store, "registry.json"))
-        maction, mmsg = link_project_memory(store, claude_projects, harnesses,
-                                             existing_reg, dry_run)
+        maction, mmsg = link_project_memory(
+            store, claude_projects, harnesses, existing_reg, dry_run
+        )
         if maction == "changed":
             changes += 1
             print(f"{glyph('chg')} memory link {mmsg}")
@@ -1251,10 +1322,13 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
     # machine's locally-derived slice -- otherwise a machine with no local
     # symlinks would misleadingly report "0 projects" for a full store.
     detail = f"{len(merged['map'])} projects" + (
-        f", {len(merged['overrides'])} renamed" if merged["overrides"] else "")
+        f", {len(merged['overrides'])} renamed" if merged["overrides"] else ""
+    )
     if reg_changed:
-        print(f"{glyph('chg')} registry    "
-              f"{'would update' if dry_run else 'updated'} ({detail})")
+        print(
+            f"{glyph('chg')} registry    "
+            f"{'would update' if dry_run else 'updated'} ({detail})"
+        )
     else:
         print(f"{glyph('ok')} registry    up to date ({detail})")
     if verbose and merged["overrides"]:
@@ -1271,9 +1345,11 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
     gi_action = ensure_store_gitignore(gi_path, dry_run)
     if gi_action != "unchanged":
         changes += 1
-        verb = {"created": "would create" if dry_run else "created",
-                "appended": "would append to" if dry_run else "appended to",
-                "updated": "would update" if dry_run else "updated"}[gi_action]
+        verb = {
+            "created": "would create" if dry_run else "created",
+            "appended": "would append to" if dry_run else "appended to",
+            "updated": "would update" if dry_run else "updated",
+        }[gi_action]
         print(f"{glyph('chg')} .gitignore  {verb} ({_short(gi_path)})")
     else:
         print(f"{glyph('ok')} .gitignore  up to date ({_short(gi_path)})")
@@ -1287,23 +1363,27 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
     if not apply_config:
         print(f"{glyph('ok')} pointers    skipped (config changes declined)")
     else:
-        pacts = [(n, upsert_pointer(p, dry_run), p)
-                 for n, p in harnesses.items() if p]
+        pacts = [(n, upsert_pointer(p, dry_run), p) for n, p in harnesses.items() if p]
         pchg = [a for a in pacts if a[1] != "unchanged"]
         changes += len(pchg)
         if pchg:
-            print(f"{glyph('chg')} pointers    "
-                  f"{len(pchg)} to write ({len(pacts)} harness globals)")
+            print(
+                f"{glyph('chg')} pointers    "
+                f"{len(pchg)} to write ({len(pacts)} harness globals)"
+            )
         else:
-            print(f"{glyph('ok')} pointers    up to date ({len(pacts)} harness globals)")
+            print(
+                f"{glyph('ok')} pointers    up to date ({len(pacts)} harness globals)"
+            )
         if verbose or pchg:
             for name, action, path in pacts:
                 k = "ok" if action == "unchanged" else "chg"
                 print(f"    {glyph(k)} {name:12} {action:10} {_short(path)}")
 
     # --- 4. stale references ----------------------------------------------
-    findings = scan_stale(reg, harnesses["claude_code"] or "",
-                          harness_globals=[harnesses["antigravity"]])
+    findings = scan_stale(
+        reg, harnesses["claude_code"] or "", harness_globals=[harnesses["antigravity"]]
+    )
     total = sum(len(h) for _, h in findings)
     cats = {"path": 0, "notice": 0, "review": 0}
     for _, hits in findings:
@@ -1319,11 +1399,14 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
         if cats["review"]:
             parts.append(f"{cats['review']} need review")
         if cats["notice"]:
-            parts.append(f"{cats['notice']} notice"
-                         f"{'s' if cats['notice'] != 1 else ''} (kept)")
+            parts.append(
+                f"{cats['notice']} notice{'s' if cats['notice'] != 1 else ''} (kept)"
+            )
         kind = "ok" if not actionable else ("warn" if cats["review"] else "chg")
-        print(f"{glyph(kind)} stale refs  {total} across "
-              f"{len(findings)} file(s): {', '.join(parts)}")
+        print(
+            f"{glyph(kind)} stale refs  {total} across "
+            f"{len(findings)} file(s): {', '.join(parts)}"
+        )
         # detail: everything under --verbose, else only actionable hits
         for fpath, hits in findings:
             show = hits if verbose else [h for h in hits if h[2] != "notice"]
@@ -1339,14 +1422,23 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
             fc, lc = apply_path_rewrites(findings, dry_run)
             changes += lc
             verb = "would rewrite" if dry_run else "rewrote"
-            print(f"    → {verb} {lc} path line(s) in {fc} file(s); "
-                  f"notice/review lines untouched")
+            print(
+                f"    → {verb} {lc} path line(s) in {fc} file(s); "
+                f"notice/review lines untouched"
+            )
             if cats["review"]:
-                print(f"    {glyph('warn')} {cats['review']} review line(s) "
-                      f"need a human — not edited")
+                print(
+                    f"    {glyph('warn')} {cats['review']} review line(s) "
+                    f"need a human — not edited"
+                )
         elif cats["path"]:
-            print(_c(f"    → run with --apply-cleanup to rewrite "
-                     f"{cats['path']} path line(s)", "dim"))
+            print(
+                _c(
+                    f"    → run with --apply-cleanup to rewrite "
+                    f"{cats['path']} path line(s)",
+                    "dim",
+                )
+            )
 
     # --- 5. skills ---------------------------------------------------------
     if not apply_config:
@@ -1365,8 +1457,10 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
         # nothing to the user -- lead with the outcome and NAME the harnesses.
         hnames = ", ".join(sorted({a[0] for a in sk}))
         if chg:
-            print(f"{glyph('chg')} skills      "
-                  f"{len(chg)} to link into {hnames} ({n_ok} already linked)")
+            print(
+                f"{glyph('chg')} skills      "
+                f"{len(chg)} to link into {hnames} ({n_ok} already linked)"
+            )
         else:
             print(f"{glyph('ok')} skills      all linked into {hnames}")
         if verbose or chg:
@@ -1381,8 +1475,10 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
         if haction == "added":
             changes += 1
             verb = "would wire" if dry_run else "wired"
-            print(f"{glyph('chg')} stop hook   {verb} consolidation hook "
-                  f"({_short(hpath)})")
+            print(
+                f"{glyph('chg')} stop hook   {verb} consolidation hook "
+                f"({_short(hpath)})"
+            )
         elif haction == "present":
             print(f"{glyph('ok')} stop hook   already wired ({_short(hpath)})")
         elif haction == "no-claude":
@@ -1399,10 +1495,14 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
         paction, ppath = wire_pull_hook(dry_run)
         if paction in ("added", "healed"):
             changes += 1
-            verb = ("would wire" if dry_run else "wired") if paction == "added" \
+            verb = (
+                ("would wire" if dry_run else "wired")
+                if paction == "added"
                 else ("would heal" if dry_run else "healed")
-            print(f"{glyph('chg')} pull hook   {verb} store-pull hook "
-                  f"({_short(ppath)})")
+            )
+            print(
+                f"{glyph('chg')} pull hook   {verb} store-pull hook ({_short(ppath)})"
+            )
         elif paction == "present":
             print(f"{glyph('ok')} pull hook   already wired ({_short(ppath)})")
         elif paction == "no-claude":
@@ -1415,10 +1515,12 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
     # --- 8. leftover claude-memory clone (migration cleanup, warn only) ----
     legacy = detect_legacy_clone()
     if legacy:
-        print(f"{glyph('warn')} legacy clone  found {_short(legacy)} — a "
-              f"leftover pre-rename clone; not the live store, not deleted "
-              f"automatically. Remove it by hand once you've confirmed "
-              f"nothing still points at it.")
+        print(
+            f"{glyph('warn')} legacy clone  found {_short(legacy)} — a "
+            f"leftover pre-rename clone; not the live store, not deleted "
+            f"automatically. Remove it by hand once you've confirmed "
+            f"nothing still points at it."
+        )
 
     # --- verdict -----------------------------------------------------------
     print()
@@ -1447,8 +1549,9 @@ def _update_cache_path():
 
 def _git_engine(*args, timeout=None):
     engine = os.path.dirname(os.path.realpath(__file__))
-    return subprocess.run(["git", "-C", engine, *args],
-                          capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        ["git", "-C", engine, *args], capture_output=True, text=True, timeout=timeout
+    )
 
 
 def update_nudge():
@@ -1467,8 +1570,7 @@ def update_nudge():
         r = _git_engine("rev-parse", "--is-inside-work-tree")
         if r.returncode != 0 or r.stdout.strip() != "true":
             return None
-        up = _git_engine("rev-parse", "--abbrev-ref",
-                         "--symbolic-full-name", "@{u}")
+        up = _git_engine("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
         if up.returncode != 0:
             return None
         upstream = up.stdout.strip()
@@ -1488,11 +1590,12 @@ def update_nudge():
             except Exception:
                 pass  # offline / slow remote — fall back to local refs
 
-        behind = _git_engine("rev-list", "--count",
-                             f"HEAD..{upstream}").stdout.strip()
+        behind = _git_engine("rev-list", "--count", f"HEAD..{upstream}").stdout.strip()
         if behind and behind != "0":
-            return (f"{behind} engine update(s) available on {upstream} — "
-                    f"run `okfmem update`")
+            return (
+                f"{behind} engine update(s) available on {upstream} — "
+                f"run `okfmem update`"
+            )
     except Exception:
         return None
     return None
@@ -1508,28 +1611,35 @@ def cmd_status(store):
         wired = "—"
         if path and os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                wired = "pointer PRESENT" if MARKER_OPEN in f.read() else "pointer MISSING"
+                wired = (
+                    "pointer PRESENT" if MARKER_OPEN in f.read() else "pointer MISSING"
+                )
         print(f"  {name:12} {path or 'not found'}   {wired}")
 
     if os.path.exists(reg_path):
         with open(reg_path) as f:
             reg = json.load(f)
-        print(f"\n  registry: {len(reg.get('map', {}))} roots, "
-              f"{len(reg.get('overrides', {}))} overrides  ({reg_path})")
+        print(
+            f"\n  registry: {len(reg.get('map', {}))} roots, "
+            f"{len(reg.get('overrides', {}))} overrides  ({reg_path})"
+        )
     else:
         print(f"\n  registry: MISSING ({reg_path})")
 
     reg = build_registry(store, os.path.join(home, ".claude", "projects"))[0]
-    findings = scan_stale(reg, harnesses["claude_code"] or "",
-                          harness_globals=[harnesses["antigravity"]])
+    findings = scan_stale(
+        reg, harnesses["claude_code"] or "", harness_globals=[harnesses["antigravity"]]
+    )
     total = sum(len(h) for _, h in findings)
     cats = {"path": 0, "notice": 0, "review": 0}
     for _, hits in findings:
         for _, _, cat in hits:
             cats[cat] += 1
-    print(f"  stale refs: {total} line(s) across {len(findings)} file(s) "
-          f"({cats['path']} path-swap, {cats['notice']} notice, "
-          f"{cats['review']} review)")
+    print(
+        f"  stale refs: {total} line(s) across {len(findings)} file(s) "
+        f"({cats['path']} path-swap, {cats['notice']} notice, "
+        f"{cats['review']} review)"
+    )
 
     sk = link_skills(dry_run=True)
     if sk:
@@ -1551,10 +1661,12 @@ def cmd_status(store):
             with open(settings, "r", encoding="utf-8") as f:
                 sdata = json.load(f)
             stop = (sdata.get("hooks", {}) or {}).get("Stop", []) or []
-            if any(isinstance(h, dict)
-                   and "memory_consolidate.py" in h.get("command", "")
-                   for g in stop if isinstance(g, dict)
-                   for h in g.get("hooks", [])):
+            if any(
+                isinstance(h, dict) and "memory_consolidate.py" in h.get("command", "")
+                for g in stop
+                if isinstance(g, dict)
+                for h in g.get("hooks", [])
+            ):
                 hook = "wired"
         except (OSError, ValueError):
             hook = "settings.json unreadable"
@@ -1567,8 +1679,13 @@ def cmd_status(store):
             with open(settings, "r", encoding="utf-8") as f:
                 sdata = json.load(f)
             starts = (sdata.get("hooks", {}) or {}).get("SessionStart", []) or []
-            cmds = [h.get("command", "") for g in starts if isinstance(g, dict)
-                    for h in g.get("hooks", []) if isinstance(h, dict)]
+            cmds = [
+                h.get("command", "")
+                for g in starts
+                if isinstance(g, dict)
+                for h in g.get("hooks", [])
+                if isinstance(h, dict)
+            ]
             if any(_is_managed_pull_command(c) for c in cmds):
                 pull_hook = "wired"
             elif any(_is_legacy_pull_command(c) for c in cmds):
@@ -1577,10 +1694,64 @@ def cmd_status(store):
             pull_hook = "settings.json unreadable"
     print(f"  pull hook: {pull_hook}")
 
+    # Store sync state — the "is my memory actually backed up?" half of
+    # status. Wiring can be perfectly green while the store itself sits
+    # dirty, unpushed, or delinked from its remote (exactly what an
+    # uninstall/reinstall cycle leaves behind); without this line, status
+    # says "all ok" while memory exists on one disk only.
+    def _sgit(*args):
+        return subprocess.run(
+            ["git", "-C", store, *args], capture_output=True, text=True, timeout=30
+        )
+
+    if _sgit("rev-parse", "--git-dir").returncode != 0:
+        print("  ! store sync: NOT A GIT REPO — re-run install to initialize")
+    else:
+        problems = []
+        st = _sgit("status", "--porcelain")
+        if st.returncode == 0:
+            n_dirty = len([ln for ln in st.stdout.splitlines() if ln.strip()])
+            if n_dirty:
+                problems.append(f"{n_dirty} uncommitted change(s)")
+
+        upstream_name = None
+        remote = _sgit("remote", "get-url", "origin")
+        if remote.returncode != 0:
+            problems.append(
+                "NO REMOTE — memory is not backed up (re-run install to relink)"
+            )
+        else:
+            up = _sgit("rev-parse", "--abbrev-ref", "@{u}")
+            if up.returncode != 0:
+                problems.append(
+                    "no upstream tracking branch "
+                    "(git branch --set-upstream-to=origin/main)"
+                )
+            else:
+                upstream_name = up.stdout.strip()
+                # `--left-right --count @{u}...HEAD` prints "<behind>\t<ahead>":
+                # left = commits only on upstream, right = commits only on HEAD.
+                counts = _sgit("rev-list", "--left-right", "--count", "@{u}...HEAD")
+                if counts.returncode == 0:
+                    parts = counts.stdout.split()
+                    behind, ahead = (parts + ["0", "0"])[:2]
+                    if ahead != "0":
+                        problems.append(f"{ahead} unpushed commit(s)")
+                    if behind != "0":
+                        problems.append(f"{behind} commit(s) behind {upstream_name}")
+
+        if problems:
+            print(f"  ! store sync: {'; '.join(problems)} — run `okfmem sync`")
+        else:
+            suffix = f" with {upstream_name}" if upstream_name else ""
+            print(f"  store sync: clean, in sync{suffix}")
+
     legacy_clone = detect_legacy_clone()
     if legacy_clone:
-        print(f"  {glyph('warn')} legacy clone: {_short(legacy_clone)} "
-              f"(leftover pre-rename clone — not deleted automatically)")
+        print(
+            f"  {glyph('warn')} legacy clone: {_short(legacy_clone)} "
+            f"(leftover pre-rename clone — not deleted automatically)"
+        )
 
     nudge = update_nudge()
     if nudge:
@@ -1589,27 +1760,45 @@ def cmd_status(store):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--status", action="store_true",
-                    help="print wiring + drift, change nothing")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the plan, write nothing")
-    ap.add_argument("-v", "--verbose", action="store_true",
-                    help="expand every step to per-item detail (default: quiet — "
-                         "idle steps collapse to one line)")
-    ap.add_argument("--apply-cleanup", action="store_true",
-                    help="rewrite claude-memory->okfmem-store on path lines "
-                         "(retirement-notice + review lines left untouched)")
-    ap.add_argument("--no-hook", action="store_true",
-                    help="do not auto-wire the Claude Code consolidation Stop "
-                         "hook or the SessionStart store-pull hook into "
-                         "~/.claude/settings.json")
-    ap.add_argument("-y", "--yes", action="store_true",
-                    help="apply config changes (settings.json hooks + skill/"
-                         "memory links under ~/.claude) without prompting -- "
-                         "for installers/CI. A non-interactive run WITHOUT this "
-                         "skips them and prints the manual command instead.")
-    ap.add_argument("--store", default=os.environ.get(
-        "OKFMEM_STORE", os.path.expanduser("~/okfmem-store")))
+    ap.add_argument(
+        "--status", action="store_true", help="print wiring + drift, change nothing"
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="print the plan, write nothing"
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="expand every step to per-item detail (default: quiet — "
+        "idle steps collapse to one line)",
+    )
+    ap.add_argument(
+        "--apply-cleanup",
+        action="store_true",
+        help="rewrite claude-memory->okfmem-store on path lines "
+        "(retirement-notice + review lines left untouched)",
+    )
+    ap.add_argument(
+        "--no-hook",
+        action="store_true",
+        help="do not auto-wire the Claude Code consolidation Stop "
+        "hook or the SessionStart store-pull hook into "
+        "~/.claude/settings.json",
+    )
+    ap.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="apply config changes (settings.json hooks + skill/"
+        "memory links under ~/.claude) without prompting -- "
+        "for installers/CI. A non-interactive run WITHOUT this "
+        "skips them and prints the manual command instead.",
+    )
+    ap.add_argument(
+        "--store",
+        default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")),
+    )
     args = ap.parse_args()
 
     store = os.path.abspath(os.path.expanduser(args.store))
@@ -1620,8 +1809,14 @@ def main():
     if args.status:
         cmd_status(store)
     else:
-        cmd_run(store, args.dry_run, args.apply_cleanup, args.verbose,
-                wire_hook=not args.no_hook, assume_yes=args.yes)
+        cmd_run(
+            store,
+            args.dry_run,
+            args.apply_cleanup,
+            args.verbose,
+            wire_hook=not args.no_hook,
+            assume_yes=args.yes,
+        )
 
 
 if __name__ == "__main__":
