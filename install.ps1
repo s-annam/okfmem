@@ -287,6 +287,32 @@ function Set-StoreRemote {
 # the manual hint.
 Set-StoreRemote $StoreDir
 
+# Optional: okfmem save-state badge in the Claude Code statusline. Outward
+# (writes settings.json), so gated on an explicit yes; Read-PromptAnswer returns
+# $null under -NonInteractive so a piped install skips cleanly. memory_init.py
+# sets it only when no statusline exists, else prints a compose snippet.
+function Set-StatuslineBadge {
+    # Probe the CURRENT statusline first (read-only) so the prompt tells the
+    # truth about what pressing Y does here: a fresh setup gets the badge set,
+    # a custom statusline gets a compose snippet -- wiring never clobbers it. A
+    # blank/unknown probe (older engine) falls back to the generic prompt.
+    $state = (& $PyCmd (Join-Path $EngineDir "memory_init.py") --statusline-state 2>$null | Select-Object -First 1)
+    switch -Regex ($state) {
+        '^okfmem$'    { Write-Host "=> okfmem save-state badge already in your statusline."; return }
+        '^no-claude$' { return }  # no ~/.claude yet -- nothing to wire against
+        '^custom$'    { $prompt = "You already have a Claude Code statusline. Print a snippet to add the okfmem save-state badge to it? [y/N]" }
+        default       { $prompt = "Show an okfmem save-state badge in your Claude Code statusline? [y/N]" }
+    }
+    $ans = Read-PromptAnswer $prompt
+    if ($null -eq $ans) { return }
+    if ($ans -match '^[Yy]') {
+        & $PyCmd (Join-Path $EngineDir "memory_init.py") --wire-statusline
+    } else {
+        Write-Host "   Skipped. Add it later with:  okfmem init --wire-statusline"
+    }
+}
+Set-StatuslineBadge
+
 Write-Host ""
 Write-Host "okfmem installation complete!"
 Write-Host ""
