@@ -39,6 +39,37 @@ The installer will:
 
 Make sure `~/.local/bin` is in your `$PATH`. (e.g., `export PATH="$HOME/.local/bin:$PATH"`).
 
+### Uninstalling
+
+```bash
+./uninstall.sh
+```
+
+**On Windows:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File uninstall.ps1
+```
+
+This removes the `okfmem` CLI wrapper(s) and every okfmem-managed harness wiring
+step install/init created — pointer blocks, skill links, per-project memory
+links, and the Stop/SessionStart hooks — leaving anything it didn't create
+untouched. **All memory data is kept by default.** It also offers two opt-in
+steps, both off unless you say yes: delinking the store's GitHub remote
+(`git remote remove origin` — the store and its history stay on disk), and
+fully deleting the store's data, which requires a `[y/N]` confirmation
+*followed by* typing the exact store path (or `DELETE`) — a bare `-Force`/`-y`
+can never trigger it. Both destructive prompts are skipped automatically (with
+the equivalent manual command printed) on a non-interactive/piped run.
+
+Preview everything first with `--dry-run` (`-DryRun` on Windows): it removes no
+wrapper, runs the unwire step in dry-run, and describes the two opt-in prompts
+instead of showing them — no state is changed.
+
+```bash
+./uninstall.sh --dry-run
+```
+
 ### Updating
 
 The engine is a git clone, so updating it is one command — same on every OS:
