@@ -124,7 +124,8 @@ POINTER_BLOCK = f"{MARKER_OPEN}\n{POINTER_BODY}\n{MARKER_CLOSE}"
 GITIGNORE_MARKER_OPEN = "# BEGIN okfmem-managed v1 (do not edit between markers)"
 GITIGNORE_MARKER_CLOSE = "# END okfmem-managed"
 
-GITIGNORE_LINES = (".okfmem-sync.lock", "*.db", "__pycache__/", "*.pyc", ".DS_Store")
+GITIGNORE_LINES = (".okfmem-sync.lock", ".session-trail.md", "*.db",
+                   "__pycache__/", "*.pyc", ".DS_Store")
 
 GITIGNORE_BODY = (
     "# okfmem per-machine runtime / rebuildable -- never synced\n"
@@ -1318,6 +1319,139 @@ def wire_stop_hook(dry_run):
 
 
 # ---------------------------------------------------------------------------
+# Statusline save-state badge (opt-in, offered by the installer)
+# ---------------------------------------------------------------------------
+def statusline_script_path():
+    """Absolute path to the platform's badge reader shipped beside the engine."""
+    engine = os.path.dirname(os.path.realpath(__file__))
+    name = "okfmem-statusline.ps1" if os.name == "nt" else "okfmem-statusline.sh"
+    return os.path.join(engine, name)
+
+
+def statusline_command():
+    """The statusLine command string that renders ONLY the okfmem badge."""
+    script = statusline_script_path()
+    if os.name == "nt":
+        return f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script}"'
+    return f'bash "{script}"'
+
+
+def statusline_delegate_snippet():
+    """A copy-paste block that COMPOSES the badge into an EXISTING statusline
+    (bash), guarded so a missing script never breaks the line — mirrors how the
+    caveman badge is delegated."""
+    script = statusline_script_path()
+    return (
+        "# --- okfmem save-state badge ---\n"
+        'okfmem_badge=""\n'
+        f'okfmem_script="{script}"\n'
+        '[ -f "$okfmem_script" ] && okfmem_badge=$(bash "$okfmem_script" 2>/dev/null)\n'
+        "# then add to your rendered line, e.g.:  "
+        '[ -n "$okfmem_badge" ] && parts+=("$okfmem_badge")'
+    )
+
+
+def wire_statusline(dry_run):
+    """Set Claude Code's `statusLine` to the okfmem save-state badge — but ONLY
+    when the user has none, so an existing (custom) statusline is NEVER
+    clobbered. Rung-2 (writes ~/.claude/settings.json); the caller gates it
+    behind an explicit opt-in.
+
+    Returns (action, path):
+      'added'      — no statusLine existed; set it to the badge (`.okfmem.bak`
+                     backs up the prior settings.json)
+      'present'    — statusLine already runs the okfmem badge; left as-is
+      'custom'     — a DIFFERENT statusLine exists; left untouched (the caller
+                     prints the compose snippet instead)
+      'no-claude'  — ~/.claude missing; nothing to wire
+      'skip (...)' — settings.json unreadable/wrong shape; wire manually
+    """
+    home = os.path.expanduser("~")
+    claude_dir = os.path.join(home, ".claude")
+    if not os.path.isdir(claude_dir):
+        return ("no-claude", None)
+    settings = os.path.join(claude_dir, "settings.json")
+
+    data = {}
+    if os.path.exists(settings):
+        try:
+            with open(settings, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return ("skip (settings.json unreadable — wire manually)", settings)
+    if not isinstance(data, dict):
+        return ("skip (settings.json not an object — wire manually)", settings)
+
+    existing = data.get("statusLine")
+    if isinstance(existing, dict):
+        if "okfmem-statusline" in str(existing.get("command", "")):
+            return ("present", settings)
+        return ("custom", settings)
+    if existing:  # a non-dict truthy value we don't understand — don't clobber
+        return ("custom", settings)
+
+    data["statusLine"] = {"type": "command", "command": statusline_command()}
+    if not dry_run:
+        _write_settings_json(claude_dir, settings, data)
+    return ("added", settings)
+
+
+def statusline_state():
+    """Read-only probe of the CURRENT statusline, for a caller that wants to
+    ask the right question BEFORE wiring anything (the installers). Returns one
+    machine-readable token — never writes:
+      'none'      — no statusLine set; `--wire-statusline` WOULD add the badge
+      'okfmem'    — statusLine already runs the okfmem badge
+      'custom'    — a different statusLine exists; wiring hands over a snippet
+      'no-claude' — ~/.claude missing
+      'skip'      — settings.json unreadable/wrong shape
+    Reuses wire_statusline(dry_run=True) so the classification can't drift from
+    what an actual wire would do."""
+    action, _ = wire_statusline(dry_run=True)
+    if action == "added":
+        return "none"
+    if action == "present":
+        return "okfmem"
+    if action in ("custom", "no-claude"):
+        return action
+    return "skip"
+
+
+def cmd_statusline_state():
+    """`okfmem init --statusline-state`: print the one-word probe (above) on
+    stdout so install.sh/install.ps1 can branch their prompt copy on it. Prints
+    ONLY the token — no glyphs, no color — so a shell `$(...)` capture is clean."""
+    print(statusline_state())
+
+
+def cmd_wire_statusline(dry_run):
+    """`okfmem init --wire-statusline`: the installer's opt-in entry point.
+    Sets the badge when there's no statusline, otherwise hands over the compose
+    snippet — never clobbers a custom statusline."""
+    action, path = wire_statusline(dry_run)
+    if action == "added":
+        verb = "would set" if dry_run else "set"
+        print(f"{glyph('chg')} statusline  {verb} to the okfmem save badge "
+              f"({_short(path)}) — a minimal one-badge line; edit statusLine in "
+              f"settings.json to customize")
+    elif action == "present":
+        print(f"{glyph('ok')} statusline  already shows the okfmem badge "
+              f"({_short(path)})")
+    elif action == "custom":
+        print(f"{glyph('ok')} statusline  you already have a statusline "
+              f"({_short(path)}) — left untouched. Compose the badge in with:")
+        print(_c(_indent(statusline_delegate_snippet(), "    "), "dim"))
+    elif action == "no-claude":
+        print(f"{glyph('ok')} statusline  no Claude Code dir — skipped")
+    else:
+        print(f"{glyph('warn')} statusline  {action}")
+
+
+def _indent(text, prefix):
+    return "\n".join(prefix + ln if ln else ln for ln in text.split("\n"))
+
+
+# ---------------------------------------------------------------------------
 # SessionStart store-pull hook (cross-machine sync)
 # ---------------------------------------------------------------------------
 # Pre-#16, the ONLY way this hook existed was a hand-added `git -C <path> pull
@@ -1809,6 +1943,14 @@ def cmd_run(
             f"nothing still points at it."
         )
 
+    # --- statusline badge hint (guidance only; never auto-edits a statusline) -
+    # okfmem can't safely inject a segment into an arbitrary statusline script,
+    # so it ships the hardened reader and points the way -- a rung-1 print, no
+    # mutation. The Stop hook already writes the flag the badge renders.
+    print(f"{glyph('ok')} statusline  optional save-state badge available — "
+          f"run `okfmem init --wire-statusline` to add it (the installer "
+          f"offers this; opt out with OKFMEM_NO_STATUS=1)")
+
     # --- verdict -----------------------------------------------------------
     print()
     tail = _c(f"({_short(store)} · {mode})", "dim")
@@ -2083,10 +2225,35 @@ def main():
         "skips them and prints the manual command instead.",
     )
     ap.add_argument(
+        "--wire-statusline",
+        action="store_true",
+        help="opt-in: set Claude Code's statusLine to the okfmem save-state "
+        "badge (only when none exists; a custom statusline is left "
+        "untouched with a compose snippet). The installer offers this "
+        "interactively.",
+    )
+    ap.add_argument(
+        "--statusline-state",
+        action="store_true",
+        help="print a one-word probe of the current statusline "
+        "(none|okfmem|custom|no-claude|skip) and exit -- read-only, used by "
+        "the installers to ask the right question before wiring.",
+    )
+    ap.add_argument(
         "--store",
         default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")),
     )
     args = ap.parse_args()
+
+    if args.statusline_state:
+        # Pure read; independent of a store (needs only ~/.claude).
+        cmd_statusline_state()
+        return
+
+    if args.wire_statusline:
+        # Targeted opt-in step; independent of a store (needs only ~/.claude).
+        cmd_wire_statusline(args.dry_run)
+        return
 
     store = os.path.abspath(os.path.expanduser(args.store))
     if not os.path.isdir(os.path.join(store, "projects")):
