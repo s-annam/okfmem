@@ -18,6 +18,23 @@ issue number is absent, recover it from the branch name (`feat/...-issue-5`,
 unknown, open the PR without an issue link and note that in the output — don't
 block on it.
 
+**Refs that arrive after the PR already exists.** If the issue number only
+becomes known once the PR is open (e.g. discovered during review), don't leave
+the commit message stale — amend it: append the `Closes #N` / `Refs #N` trailer,
+leaving the rest of the message otherwise intact, and diff
+`git log -1 --format=%B` before and after the amend to confirm nothing else
+changed:
+
+```bash
+git log -1 --format=%B > /tmp/before.txt   # or a scratch path — compare before/after
+git commit --amend
+git log -1 --format=%B > /tmp/after.txt
+diff /tmp/before.txt /tmp/after.txt        # expect only the added trailer line
+git push --force-with-lease -u origin "$BRANCH"   # never bare `--force`
+```
+
+Then add the same ref to the PR body (Step 5) if it isn't there yet.
+
 If a calling skill hands over **provenance records** (`{stage, model, effort}`),
 render them verbatim into the `## Provenance` block (Step 5.5) — don't re-derive.
 
@@ -233,6 +250,10 @@ merges via admin bypass once `verify` is green. Request reviewers with
 - **One PR per issue/topic.** Keep the diff focused.
 - **Run the leak gate before every push (Step 3.5).** `python3 scripts/check-leaks.py`
   must exit 0, and eyeball any new prose for private strings the gate can't judge.
+- **Refs go in both the commit message and the PR body.** `Closes #N` / `Refs #N`
+  is a trailing line in the commit message (Step 2/3.6) — one `Closes`/`Refs`
+  line per issue — and is repeated in the PR body (Step 5). The commit message
+  is the artifact that lands in `main`; don't rely on the PR body alone.
 - Use `Closes #N` only when the PR fully resolves the issue; else `Refs #N`.
 - Match commit-type prefixes from `CONTRIBUTING.md`
   (`feat`/`fix`/`chore`/`refactor`/`docs`/`test`).

@@ -860,7 +860,274 @@ def _current_git_root():
     return os.path.normpath(out.stdout.strip())
 
 
-def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
+# ---------------------------------------------------------------------------
+# Orphan-page adoption (#35)
+# ---------------------------------------------------------------------------
+# A non-empty PLAIN directory at the memory link path is real user content --
+# pages authored before the store link ever existed (the Windows box left two
+# such pages that never reached the store). The old code dead-ended there with
+# "resolve by hand", silently stranding them. When the store already has a
+# project dir for this repo, adopt the pages into it instead. Rung-2 (moves
+# user content into a tracked, pushable store AND swaps a dir under ~/.claude
+# for a link): gated behind [y/N]; --yes/CI consents; a non-interactive decline
+# keeps the safe skip and prints the exact manual command.
+ORPHAN_SUFFIX = ".orphan"
+
+
+def _scan_orphan_dir(orphan_dir, store_project_dir):
+    """Read-only. Walk `orphan_dir` and classify every file against the store
+    project dir. Returns (adopt, collide, orphan_memory):
+
+      adopt         = [relpath] pages with NO counterpart in the store
+                      (copied to their natural store path)
+      collide       = [relpath] pages whose store counterpart already exists
+                      (preserved under a `.orphan` suffix; NEVER overwritten)
+      orphan_memory = relpath of the orphan's top-level `MEMORY.md`, or None
+
+    The top-level `MEMORY.md` is handled by index-merge / wholesale-adopt (see
+    `_adopt_and_link_orphan`), never as an ordinary page, so it is excluded
+    from both lists. Every other file -- including `STATE.md`, archived pages
+    under `archive/`, and anything else -- is adopted or collision-preserved so
+    nothing in the orphan dir is stranded when it is later removed."""
+    adopt, collide = [], []
+    orphan_memory = None
+    for dirpath, _dirnames, filenames in os.walk(orphan_dir):
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, orphan_dir)
+            if rel == "MEMORY.md":
+                orphan_memory = rel
+                continue
+            if os.path.exists(os.path.join(store_project_dir, rel)):
+                collide.append(rel)
+            else:
+                adopt.append(rel)
+    return sorted(adopt), sorted(collide), orphan_memory
+
+
+def _preserved_orphan_path(store_project_dir, rel):
+    """Non-clobbering destination for a colliding orphan file: the store path
+    plus a `.orphan` suffix, with a numeric bump if a prior `.orphan` already
+    sits there (a repeat adoption). Never returns a path that would overwrite
+    store truth."""
+    base = os.path.join(store_project_dir, rel) + ORPHAN_SUFFIX
+    cand = base
+    n = 2
+    while os.path.exists(cand):
+        cand = f"{base}.{n}"
+        n += 1
+    return cand
+
+
+def _memory_line_references(line, slug):
+    """True if a MEMORY.md index `line` points at `<slug>.md` -- same matching
+    the consolidation pass uses to DROP a line, reused here to detect an
+    already-present pointer so the merge never duplicates one."""
+    return bool(
+        re.search(r"[(/]" + re.escape(slug) + r"\.md\)", line)
+        or re.search(r"^\s*[-*]\s+" + re.escape(slug) + r"\.md\b", line)
+    )
+
+
+def _merge_memory_index(orphan_dir, store_project_dir, adopted_rels):
+    """Union the orphan `MEMORY.md`'s pointer lines for the ADOPTED top-level
+    pages into the store's existing `MEMORY.md`. Additive only -- never removes
+    or reorders the store's own lines; appends a pointer only for a slug the
+    store index doesn't already carry. Prefers the orphan's own curated hook
+    line for that slug; synthesizes a minimal `- [slug](slug.md)` bullet if the
+    orphan index has none. Called only when BOTH indexes exist (a store with no
+    `MEMORY.md` gets the orphan's adopted wholesale instead). Returns the number
+    of pointer lines appended."""
+    store_md = os.path.join(store_project_dir, "MEMORY.md")
+    orphan_md = os.path.join(orphan_dir, "MEMORY.md")
+
+    slugs = [
+        rel[:-3]
+        for rel in adopted_rels
+        if rel.endswith(".md")
+        and os.sep not in rel
+        and (os.altsep or os.sep) not in rel
+    ]
+    if not slugs:
+        return 0
+
+    store_text = ""
+    if os.path.isfile(store_md):
+        with open(store_md, "r", encoding="utf-8", newline="") as f:
+            store_text = f.read()
+    eol = "\r\n" if "\r\n" in store_text else "\n"
+
+    orphan_lines = []
+    if os.path.isfile(orphan_md):
+        with open(orphan_md, "r", encoding="utf-8", newline="") as f:
+            otext = f.read()
+        oeol = "\r\n" if "\r\n" in otext else "\n"
+        orphan_lines = otext.split(oeol)
+
+    store_lines = store_text.split(eol) if store_text else []
+    to_append = []
+    for slug in slugs:
+        if any(_memory_line_references(ln, slug) for ln in store_lines):
+            continue  # already indexed by the store -- leave it be
+        line = next(
+            (ln for ln in orphan_lines if _memory_line_references(ln, slug)),
+            f"- [{slug}]({slug}.md)",
+        )
+        to_append.append(line)
+
+    if not to_append:
+        return 0
+    prefix = store_text
+    if prefix and not prefix.endswith(eol):
+        prefix += eol
+    with open(store_md, "w", encoding="utf-8", newline="") as f:
+        f.write(prefix + eol.join(to_append) + eol)
+    return len(to_append)
+
+
+def _install_memory_link(proj_dir, link, target_real):
+    """Create the tiered memory link (`_make_link`: symlink -> junction ->
+    copy) at `link` -> `target_real`, assuming the caller has already cleared
+    whatever sat at `link`. Returns the human-facing tier note (""/junction/
+    copy-will-go-stale) so callers report the mechanism that succeeded."""
+    os.makedirs(proj_dir, exist_ok=True)
+    tier = _make_link(target_real, link)
+    if tier == "symlink":
+        return ""
+    if tier == "junction":
+        return " (junction)"
+    return " (copy — will go stale; re-run okfmem init after engine updates)"
+
+
+def _adopt_and_link_orphan(
+    link, proj_dir, target_real, name, dry_run, assume_yes, non_interactive
+):
+    """Offer to adopt the real orphaned pages sitting in the plain directory at
+    `link` into the store project at `target_real`, then replace the dir with
+    the tiered link. The store project dir is guaranteed to exist (the caller
+    checked). Returns (status, message) like `link_project_memory`.
+
+    Copy-then-link ordering guarantees no page is EVER nowhere:
+      1. copy non-colliding pages to their store path; copy colliding ones
+         under a `.orphan` suffix (store truth is never overwritten); union the
+         orphan's MEMORY.md pointer lines into the store index (or adopt the
+         orphan's index wholesale if the store has none).
+      2. verify every copied file exists in the store with a matching size.
+      3. ONLY THEN remove the orphan dir and install the link.
+    At step 2 the content lives in BOTH the orphan dir and the store, so a
+    verification failure returns early WITHOUT removing anything -- the orphan
+    is left fully intact. After step 3 it lives in the store, which the link
+    now points at; even if link creation raised, the pages are safe in the
+    store and a later `init` re-links the (now empty) path."""
+    store_project_dir = target_real
+    adopt, collide, orphan_memory = _scan_orphan_dir(link, store_project_dir)
+    hint = "adopt with: okfmem init --yes"
+    n_total = len(adopt) + len(collide)
+
+    if dry_run:
+        bits = []
+        if adopt:
+            bits.append(f"would adopt {len(adopt)} page(s)")
+        if collide:
+            bits.append(f"{len(collide)} collision(s) to keep as .orphan")
+        if not bits:
+            bits.append("no new pages")
+        return ("changed", ", ".join(bits) + f" into {name}, then link")
+
+    # --- rung-2 consent (moves user content + swaps a ~/.claude dir) --------
+    if assume_yes:
+        pass
+    elif non_interactive:
+        return (
+            "skip",
+            f"{n_total} orphaned page(s) at the memory link path — {hint}",
+        )
+    else:
+        try:
+            ans = (
+                input(
+                    f"Adopt {n_total} orphaned memory page(s) into store project "
+                    f"'{name}'? [y/N] "
+                )
+                .strip()
+                .lower()
+            )
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            return (
+                "skip",
+                f"{n_total} orphaned page(s) at the memory link path — {hint}",
+            )
+
+    # --- 1. copy into the store (content now exists in BOTH places) ---------
+    copied = []  # (src, dest) pairs, verified below before anything is removed
+    try:
+        for rel in adopt:
+            src = os.path.join(link, rel)
+            dest = os.path.join(store_project_dir, rel)
+            os.makedirs(os.path.dirname(dest) or store_project_dir, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied.append((src, dest))
+        for rel in collide:
+            src = os.path.join(link, rel)
+            dest = _preserved_orphan_path(store_project_dir, rel)
+            os.makedirs(os.path.dirname(dest) or store_project_dir, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied.append((src, dest))
+        store_md = os.path.join(store_project_dir, "MEMORY.md")
+        wholesale_memory = orphan_memory is not None and not os.path.isfile(store_md)
+        if wholesale_memory:
+            src = os.path.join(link, "MEMORY.md")
+            shutil.copy2(src, store_md)
+            copied.append((src, store_md))
+    except OSError as e:
+        return (
+            "skip",
+            f"adoption copy failed ({e}); orphan dir left intact — {hint}",
+        )
+
+    # --- 2. verify every copy landed BEFORE removing the source -------------
+    for src, dest in copied:
+        try:
+            if not os.path.isfile(dest) or os.path.getsize(dest) != os.path.getsize(
+                src
+            ):
+                raise OSError("size mismatch")
+        except OSError:
+            return (
+                "skip",
+                "adoption verification failed; orphan dir left intact — " + hint,
+            )
+
+    # Store already had its own index -> union the orphan's pointer lines in
+    # (the wholesale case above already carried the orphan's index over).
+    if orphan_memory is not None and not wholesale_memory:
+        _merge_memory_index(link, store_project_dir, adopt)
+
+    # --- 3. content is safe in the store; NOW swap the dir for the link -----
+    shutil.rmtree(link)
+    tier_note = _install_memory_link(proj_dir, link, target_real)
+
+    bits = []
+    if adopt:
+        bits.append(f"adopted {len(adopt)} page(s)")
+    if collide:
+        bits.append(f"{len(collide)} collision(s) kept as .orphan")
+    if not bits:
+        bits.append("no new pages")
+    return ("changed", ", ".join(bits) + f" -> {name}, then linked{tier_note}")
+
+
+def link_project_memory(
+    store,
+    claude_projects,
+    harnesses,
+    reg,
+    dry_run,
+    assume_yes=False,
+    non_interactive=None,
+):
     """Create/repair the per-project memory symlink for the CURRENT repo
     (cwd's git root) -- `<claude_projects>/<encoded-root>/memory` ->
     `<store>/projects/<name>`.
@@ -885,7 +1152,16 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
       run, with the reason in `message` -- not in a git repo, no Claude Code
       harness detected, or the store has no project dir for this repo yet
       (nothing to link to before a first page is ever authored).
+
+    A non-empty PLAIN directory at the link path -- real orphaned pages -- is
+    no longer a "resolve by hand" dead end: with the store project dir present
+    (always true by the time that branch is reached), `okfmem init` OFFERS TO
+    ADOPT the pages into the store, gated by `assume_yes`/`non_interactive`
+    (rung-2; see `_adopt_and_link_orphan`). `non_interactive` defaults to
+    "stdin is not a TTY" when left None.
     """
+    if non_interactive is None:
+        non_interactive = not sys.stdin.isatty()
     if not harnesses.get("claude_code"):
         return ("skip", "no Claude Code harness detected")
     root = _current_git_root()
@@ -932,9 +1208,20 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
         verb = "repoint"
     elif os.path.isdir(link):
         if os.listdir(link):
-            return (
-                "skip",
-                "non-empty directory already at the memory link path — resolve by hand",
+            # Non-empty plain dir = real orphaned pages authored before the
+            # store link existed. The store project dir exists (verified above
+            # -- we'd have returned "no store project dir" otherwise), so OFFER
+            # TO ADOPT them instead of dead-ending at "resolve by hand". The
+            # delegate copies-then-links under its own rung-2 consent, so
+            # content is never stranded nor store truth clobbered.
+            return _adopt_and_link_orphan(
+                link,
+                proj_dir,
+                target_real,
+                name,
+                dry_run,
+                assume_yes,
+                non_interactive,
             )
         verb = "link"  # empty placeholder dir left by the harness -- nothing
         # was pointed before, so "linked to X" reads correctly (not "repointed").
@@ -947,7 +1234,6 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
     if dry_run:
         return ("changed", f"would {verb} to {name}")
 
-    os.makedirs(proj_dir, exist_ok=True)
     if os.path.islink(link):
         os.remove(link)
     elif _is_junction(link):
@@ -956,13 +1242,7 @@ def link_project_memory(store, claude_projects, harnesses, reg, dry_run):
         shutil.rmtree(link)  # our tier-3 copy: a non-empty real dir we own
     elif os.path.isdir(link):
         os.rmdir(link)  # confirmed empty above
-    tier = _make_link(target_real, link)
-    if tier == "symlink":
-        tier_note = ""
-    elif tier == "junction":
-        tier_note = " (junction)"
-    else:
-        tier_note = " (copy — will go stale; re-run okfmem init after engine updates)"
+    tier_note = _install_memory_link(proj_dir, link, target_real)
     return ("changed", f"{verb}ed to {name}{tier_note}")
 
 
@@ -1260,6 +1540,7 @@ def cmd_run(
     harnesses = detect_harnesses()
     mode = "dry-run" if dry_run else "apply"
     changes = 0
+    non_interactive = not sys.stdin.isatty()
 
     print(_c("okfmem init", "bold") + _c(f"  ·  {mode}", "dim") + "\n")
 
@@ -1290,7 +1571,7 @@ def cmd_run(
             "Wire okfmem into ~/.claude (hooks, harness pointers, and skill/"
             "memory links)?",
             assume_yes=assume_yes,
-            non_interactive=not sys.stdin.isatty(),
+            non_interactive=non_interactive,
             manual_hint=config_hint,
         )
 
@@ -1302,7 +1583,13 @@ def cmd_run(
     if apply_config:
         existing_reg = _load_registry(os.path.join(store, "registry.json"))
         maction, mmsg = link_project_memory(
-            store, claude_projects, harnesses, existing_reg, dry_run
+            store,
+            claude_projects,
+            harnesses,
+            existing_reg,
+            dry_run,
+            assume_yes=assume_yes,
+            non_interactive=non_interactive,
         )
         if maction == "changed":
             changes += 1
