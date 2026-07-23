@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Native Windows installer for okfmem (mirrors install.sh's intent for
-    native PowerShell/cmd — no WSL, no Git Bash required).
+    native PowerShell/cmd -- no WSL, no Git Bash required).
 
 .DESCRIPTION
     1. Checks for git and a Python launcher (py or python).
@@ -47,7 +47,7 @@ $EngineDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
-# okfmem.cmd — works from cmd.exe and from PowerShell (cmd wrappers run fine
+# okfmem.cmd -- works from cmd.exe and from PowerShell (cmd wrappers run fine
 # in both). okfmem.ps1 is a native PowerShell entry point for anyone calling
 # it from a script rather than an interactive shell.
 $OkfmemPy = Join-Path $EngineDir "okfmem"
@@ -95,7 +95,7 @@ if ($PathDirs -notcontains $BinDir) {
 Write-Host "2. Check system status by running: okfmem status"
 Write-Host "3. (Optional) Set up a remote for your store: git -C $StoreDir remote add origin <url>"
 Write-Host "4. Wire the Stop hook in your agent's settings (e.g. Claude Code's"
-Write-Host "   settings.json) using the snippet below — note the absolute path"
+Write-Host "   settings.json) using the snippet below -- note the absolute path"
 Write-Host "   and no '~' (PowerShell/cmd don't expand it the way a POSIX shell does):"
 Write-Host ""
 
