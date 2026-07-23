@@ -168,7 +168,11 @@ def test_replaces_empty_placeholder_directory(env):
     assert os.path.islink(link)
 
 
-def test_skips_nonempty_real_directory(env):
+def test_nonempty_dir_non_interactive_keeps_orphan_and_hints(env):
+    # #35: a non-empty plain dir = real orphaned pages. Declined (no TTY, no
+    # --yes) it must keep the safe skip AND upgrade the message from the old
+    # "resolve by hand" dead end to the exact manual adopt command. Nothing
+    # mutated: the orphan survives and the store is not written into.
     link = _link_path(env)
     os.makedirs(link)
     with open(os.path.join(link, "some-real-page.md"), "w") as f:
@@ -176,11 +180,113 @@ def test_skips_nonempty_real_directory(env):
 
     status, msg = mi.link_project_memory(
         env["store"], env["claude_projects"], env["harnesses"], env["reg"],
-        dry_run=False)
+        dry_run=False, non_interactive=True)
     assert status == "skip"
-    assert "non-empty" in msg
-    # Untouched -- the real content survives.
+    assert "adopt" in msg.lower()
+    assert "okfmem init --yes" in msg
+    # Untouched -- the real content survives, no link created.
     assert os.path.isfile(os.path.join(link, "some-real-page.md"))
+    assert not os.path.islink(link)
+    assert not os.path.exists(
+        os.path.join(env["store"], "projects", "myproj", "some-real-page.md"))
+
+
+def test_adopts_orphan_pages_with_yes(env):
+    # --yes consents (the install path). Non-colliding pages copied into the
+    # store; the store had no MEMORY.md, so the orphan's index is adopted
+    # wholesale; the dir is then replaced by the tiered link.
+    link = _link_path(env)
+    os.makedirs(link)
+    with open(os.path.join(link, "confirm-destructive-ops.md"), "w") as f:
+        f.write("page A body")
+    with open(os.path.join(link, "windows-shell.md"), "w") as f:
+        f.write("page B body")
+    with open(os.path.join(link, "MEMORY.md"), "w") as f:
+        f.write("# Memory Index\n- [Confirm](confirm-destructive-ops.md) - A\n")
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=False, assume_yes=True)
+    assert status == "changed"
+    assert "adopted 2 page(s)" in msg
+    store_proj = os.path.join(env["store"], "projects", "myproj")
+    assert os.path.isfile(os.path.join(store_proj, "confirm-destructive-ops.md"))
+    assert os.path.isfile(os.path.join(store_proj, "windows-shell.md"))
+    # Store lacked MEMORY.md -> orphan's index adopted wholesale, indexing them.
+    with open(os.path.join(store_proj, "MEMORY.md")) as f:
+        idx = f.read()
+    assert "confirm-destructive-ops.md" in idx
+    # Orphan dir replaced by a link to the store (symlink/junction where the
+    # box allows it).
+    if os.path.islink(link) or mi._is_junction(link):
+        assert os.path.realpath(link) == os.path.realpath(store_proj)
+
+
+def test_adoption_merges_into_existing_store_memory_md(env):
+    # Store already has a curated MEMORY.md -> union the orphan's pointer line
+    # for the adopted page WITHOUT disturbing the store's own lines.
+    store_proj = os.path.join(env["store"], "projects", "myproj")
+    with open(os.path.join(store_proj, "MEMORY.md"), "w") as f:
+        f.write("# Memory Index\n- [Existing](existing.md) - keep me\n")
+    with open(os.path.join(store_proj, "existing.md"), "w") as f:
+        f.write("existing store page")
+    link = _link_path(env)
+    os.makedirs(link)
+    with open(os.path.join(link, "new-page.md"), "w") as f:
+        f.write("brand new orphan")
+    with open(os.path.join(link, "MEMORY.md"), "w") as f:
+        f.write("# Memory Index\n- [New](new-page.md) - fresh hook\n")
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=False, assume_yes=True)
+    assert status == "changed"
+    with open(os.path.join(store_proj, "MEMORY.md")) as f:
+        idx = f.read()
+    assert "existing.md" in idx          # store's own line preserved
+    assert "new-page.md" in idx          # adopted page now indexed
+    assert "fresh hook" in idx           # carried the orphan's curated hook
+    assert os.path.isfile(os.path.join(store_proj, "new-page.md"))
+
+
+def test_slug_collision_preserved_as_orphan_not_overwritten(env):
+    # An orphan page sharing a slug with an existing store page must NOT clobber
+    # store truth -- it is preserved under a .orphan suffix and reported.
+    store_proj = os.path.join(env["store"], "projects", "myproj")
+    with open(os.path.join(store_proj, "dup.md"), "w") as f:
+        f.write("STORE TRUTH")
+    link = _link_path(env)
+    os.makedirs(link)
+    with open(os.path.join(link, "dup.md"), "w") as f:
+        f.write("ORPHAN VERSION")
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=False, assume_yes=True)
+    assert status == "changed"
+    with open(os.path.join(store_proj, "dup.md")) as f:
+        assert f.read() == "STORE TRUTH"          # untouched
+    with open(os.path.join(store_proj, "dup.md.orphan")) as f:
+        assert f.read() == "ORPHAN VERSION"       # preserved, not lost
+    assert ".orphan" in msg or "collision" in msg.lower()
+
+
+def test_dry_run_describes_adoption_without_doing(env):
+    link = _link_path(env)
+    os.makedirs(link)
+    with open(os.path.join(link, "p.md"), "w") as f:
+        f.write("body")
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"], env["reg"],
+        dry_run=True)
+    assert status == "changed"
+    assert "would adopt" in msg
+    # Nothing mutated.
+    assert os.path.isfile(os.path.join(link, "p.md"))
+    assert not os.path.exists(
+        os.path.join(env["store"], "projects", "myproj", "p.md"))
+    assert not os.path.islink(link)
 
 
 def _make_managed_copy(link, marker_target, page="page.md"):
