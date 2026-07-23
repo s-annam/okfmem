@@ -95,6 +95,24 @@ Durable project memory: `~/okfmem-store/projects/<PROJECT>/`
 
 POINTER_BLOCK = f"{MARKER_OPEN}\n{POINTER_BODY}\n{MARKER_CLOSE}"
 
+# ---------------------------------------------------------------------------
+# Managed store .gitignore block (#27)
+# ---------------------------------------------------------------------------
+# The store is data the engine owns, so its git hygiene is the engine's job
+# too -- a fresh store (new machine, `curl | bash`, CI) has no `.gitignore`
+# until this runs. Marker-delimited like the pointer block above: idempotent,
+# re-runnable, and never clobbers a user's hand-added rules living outside
+# the markers.
+GITIGNORE_MARKER_OPEN = "# BEGIN okfmem-managed v1 (do not edit between markers)"
+GITIGNORE_MARKER_CLOSE = "# END okfmem-managed"
+
+GITIGNORE_LINES = (".okfmem-sync.lock", "*.db", "__pycache__/", "*.pyc", ".DS_Store")
+
+GITIGNORE_BODY = ("# okfmem per-machine runtime / rebuildable -- never synced\n"
+                  + "\n".join(GITIGNORE_LINES))
+
+GITIGNORE_BLOCK = f"{GITIGNORE_MARKER_OPEN}\n{GITIGNORE_BODY}\n{GITIGNORE_MARKER_CLOSE}"
+
 # Retired-system references the cleanup pass looks for. The ONLY legitimate
 # surviving mention is the retirement-notice sentence in ~/.claude/CLAUDE.md.
 STALE_PATTERNS = [
@@ -390,6 +408,45 @@ def upsert_pointer(path, dry_run):
 
     if action != "unchanged" and not dry_run:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+    return action
+
+
+# ---------------------------------------------------------------------------
+# Store .gitignore upsert (#27)
+# ---------------------------------------------------------------------------
+def ensure_store_gitignore(path, dry_run):
+    """Insert or refresh the managed `.gitignore` block at `path` (the
+    store's `.gitignore`). Absent -> create with the block appended after any
+    existing content. Present with the block -> replace it in place (a no-op
+    when it already matches, so re-running is idempotent). Present without
+    the block -> append it, leaving the user's hand-authored rules untouched.
+
+    This writes INSIDE the store (the user's own data repo) -- rung-1
+    additive bookkeeping, same tier as the registry write, so it runs
+    unconditionally (not gated behind `apply_config`; it never touches
+    `~/.claude`). Returns "created" | "appended" | "updated" | "unchanged"."""
+    existing = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            existing = f.read()
+
+    block_re = re.compile(
+        re.escape(GITIGNORE_MARKER_OPEN) + r".*?" + re.escape(GITIGNORE_MARKER_CLOSE),
+        re.DOTALL,
+    )
+    if block_re.search(existing):
+        new_text = block_re.sub(GITIGNORE_BLOCK, existing)
+        action = "unchanged" if new_text == existing else "updated"
+    else:
+        sep = "" if existing == "" or existing.endswith("\n\n") else (
+            "\n" if existing.endswith("\n") else "\n\n")
+        new_text = existing + sep + GITIGNORE_BLOCK + "\n"
+        action = "created" if existing == "" else "appended"
+
+    if action != "unchanged" and not dry_run:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_text)
     return action
@@ -1205,6 +1262,21 @@ def cmd_run(store, dry_run, apply_cleanup, verbose=False, wire_hook=True,
             print(f"    {_short(root)} → {proj}")
     for d in drift:
         print(f"    {glyph('warn')} {d}")
+
+    # --- 2b. store .gitignore (#27) -----------------------------------------
+    # Rung-1: writes INSIDE the store (the user's own data repo), same tier
+    # as the registry write above -- runs unconditionally, never gated behind
+    # the config-mutation prompt (it never touches ~/.claude).
+    gi_path = os.path.join(store, ".gitignore")
+    gi_action = ensure_store_gitignore(gi_path, dry_run)
+    if gi_action != "unchanged":
+        changes += 1
+        verb = {"created": "would create" if dry_run else "created",
+                "appended": "would append to" if dry_run else "appended to",
+                "updated": "would update" if dry_run else "updated"}[gi_action]
+        print(f"{glyph('chg')} .gitignore  {verb} ({_short(gi_path)})")
+    else:
+        print(f"{glyph('ok')} .gitignore  up to date ({_short(gi_path)})")
 
     # --- 3. pointers -------------------------------------------------------
     # Also rung-2: upsert_pointer injects okfmem's managed block into the

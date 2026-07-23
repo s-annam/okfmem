@@ -95,6 +95,12 @@ if (-not (Test-Path $StoreDir)) {
 # existing store.
 New-Item -ItemType Directory -Force -Path (Join-Path $StoreDir "projects") | Out-Null
 
+# NOTE (#27): a fresh `git init` store also has no `.gitignore` -- that is
+# NOT fixed up here. `memory_init.py --yes` below creates/maintains the
+# store's `.gitignore` (managed block: `.okfmem-sync.lock`, `*.db`,
+# `__pycache__/`, `*.pyc`, `.DS_Store`) as one of its own steps, unconditionally
+# and before this script (or anything else) ever calls `okfmem sync`.
+
 # 3. Wire it up -------------------------------------------------------------
 Write-Host "=> Running backfill and initialization..."
 & $PyCmd (Join-Path $EngineDir "memory_backfill.py")
