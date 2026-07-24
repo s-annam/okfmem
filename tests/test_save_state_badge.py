@@ -125,6 +125,32 @@ def test_command_must_run_not_merely_mention():
     assert mc.compute_save_state(t) == "unsaved"
 
 
+def test_save_is_recognised_through_path_and_interpreter_prefixes():
+    # `okfmem` is an extensionless Python script, so the real close-out is
+    # `python3 ~/okfmem/okfmem sync` — matching only the bare spelling left the
+    # badge amber over every genuinely saved session.
+    for command in ("okfmem sync",
+                    "~/okfmem/okfmem sync",
+                    "/abs/path/okfmem sync",
+                    "./okfmem sync",
+                    'python3 ~/okfmem/okfmem sync -m "msg"',
+                    "okfmem.cmd sync",
+                    "pwsh -File ./okfmem.ps1 sync",
+                    "cd /r && python3 ~/okfmem/okfmem sync"):
+        t = _edit() + "\n" + _bash(command)
+        assert mc.compute_save_state(t) == "saved", command
+
+
+def test_interpreter_stripping_does_not_manufacture_a_save():
+    # What follows the interpreter must still be the program: the same words
+    # as plain arguments are not a save, nor is merely naming the command.
+    for command in ("py build.py --then okfmem sync",
+                    "grep -o 'okfmem sync' f",
+                    'echo "run okfmem sync"'):
+        t = _edit() + "\n" + _bash(command)
+        assert mc.compute_save_state(t) == "unsaved", command
+
+
 def test_git_commit_variants_still_count_as_work():
     for command in ("git commit -m x", "git -C /repo commit --amend",
                     "cd /r && FOO=1 git commit", "sudo git commit -m x"):
