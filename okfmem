@@ -9,6 +9,8 @@ Usage:
   okfmem pull        [--quiet] [--store PATH]    # read-side sync: fetch + integrate, no commit needed
   okfmem update      [--check] [--store PATH]    # git pull the engine + re-run init
   okfmem status                                  # alias for `init --status`
+  okfmem graduate <slug> [--to PATH] [--dry-run] # promote a page into CLAUDE.md/
+                                                 # AGENTS.md + archive the source — #10
 
 Core subcommands map to the memory_*.py modules living beside this script. Store
 is resolved by each module: --store, else $OKFMEM_STORE, else ~/okfmem-store.
@@ -18,6 +20,8 @@ stays harness-agnostic, so an unknown command loads a plugin only if that file
 exists. Session search (issue #2) ships this way:
   okfmem index  [--rebuild]        # build FTS5 index over harness transcripts
   okfmem search "<query>"          # query it (off-prompt)
+  okfmem distill [--project NAME]  # propose durable pages from recurring session
+                                   # signal (report only; writes nothing) — #7
 """
 import os
 import runpy
@@ -26,10 +30,12 @@ import sys
 HERE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve symlink -> real engine dir
 MODULES = {"backfill": "memory_backfill.py", "init": "memory_init.py",
            "consolidate": "memory_consolidate.py", "sync": "memory_sync.py",
-           "pull": "memory_pull.py", "update": "memory_update.py"}
+           "pull": "memory_pull.py", "update": "memory_update.py",
+           "graduate": "memory_graduate.py"}
 # Opt-in plugin commands -> plugins/<file>. Loaded ONLY if the file is present,
 # so core install stays harness-agnostic. Several commands may share one plugin.
-PLUGINS = {"index": "memory_search.py", "search": "memory_search.py"}
+PLUGINS = {"index": "memory_search.py", "search": "memory_search.py",
+           "distill": "memory_distill.py"}
 
 
 def main():
