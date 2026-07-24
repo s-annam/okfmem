@@ -92,7 +92,8 @@ These flags are *signals*, not verdicts. Phase 3 turns them into recommendations
 For every flagged file (any flag set), read its frontmatter + first ~30 lines and classify as one of:
 
 - **keep** — pattern memories, user feedback, current operational state. Default for `feedback_*`, named patterns, and the most recent `*_landed` doc per project surface.
-- **delete** — superseded markers, CK snapshots older than the most recent two, files whose `name`/`description` is fully covered by the project's `CLAUDE.md`, "X landed" docs older than 7 days where the design rules survive in pattern memories.
+- **delete** — superseded markers, CK snapshots older than the most recent two, pure-noise files whose `name`/`description` is fully covered by the project's `CLAUDE.md` (no unique content worth keeping), "X landed" docs older than 7 days where the design rules survive in pattern memories.
+- **graduate** — a *still-valuable* page whose rule belongs in the always-loaded `CLAUDE.md` (not recall-on-demand memory): promote it into `CLAUDE.md`/`AGENTS.md` and archive the source with provenance, rather than deleting it. This is the forward, lossless alternative to `delete` for the duplicate-with-CLAUDE.md case — run `okfmem graduate <slug> [--to <dir>/CLAUDE.md]` (it distills + places, mirrors a real-file `AGENTS.md`, archives the page stamped `graduated_to`, and drops its `MEMORY.md` pointer). Reserve `delete` for duplicates with no unique content.
 - **compress** — files with unique content but verbose framing; output a one-paragraph rewrite.
 - **unsure** — content needs user judgment. Surface verbatim with a short question.
 
@@ -102,7 +103,7 @@ For every flagged file (any flag set), read its frontmatter + first ~30 lines an
 grep -F -i "$NAME_FROM_FRONTMATTER" "$CWD/CLAUDE.md" 2>/dev/null
 ```
 
-If the memory's `name` or first-line content appears in CLAUDE.md, lean toward `delete` (with rationale: "duplicate with CLAUDE.md → drift risk").
+If the memory's `name` or first-line content appears in CLAUDE.md, the page is a drift risk. Split by value: a page with unique, still-valuable rules → **graduate** (promote + archive, lossless, keeps provenance); a pure-noise duplicate with nothing worth keeping → **delete**. Prefer `graduate` whenever the content still carries a rule worth having in `CLAUDE.md` — deleting it loses both the content and where it came from.
 
 **Recency rule for `*_landed` docs:** group by surface (e.g., `agnt29_*`, `agnt32_*` are AGNT-related landed docs). Keep the most recent in each group; older ones are candidates for delete unless they encode unique content not covered elsewhere.
 
@@ -119,9 +120,11 @@ Present the plan as a single markdown response with three buckets:
 | ... | ... |
 
 ### Bucket B — duplicates with CLAUDE.md (N files)
-| File | Where it lives in CLAUDE.md |
-|---|---|
-| ... | ... |
+Recommended action per file: **graduate** a still-valuable page (promote into `CLAUDE.md`/`AGENTS.md` + archive with provenance via `okfmem graduate <slug>`), **delete** only a pure-noise duplicate. Graduate is lossless and keeps provenance; prefer it whenever the rule is worth keeping.
+
+| File | Where it lives in CLAUDE.md | Action (graduate / delete) |
+|---|---|---|
+| ... | ... | ... |
 
 ### Bucket C — superseded / aged out (N files)
 | File | Reason |
@@ -153,12 +156,13 @@ Once approved:
 
 1. Delete the approved files using `rm` (single batched command if possible).
 2. For `compress` decisions: rewrite the file in place with the agreed paragraph.
-3. **Read MEMORY.md once** (required before Write).
-4. Rewrite MEMORY.md as the tightened index:
+3. For every file the approved plan marked **graduate**, run `okfmem graduate <slug> --yes` (add `--to <dir>/CLAUDE.md` for a lane-scoped target). Phase 4 **is** the human approval gate, so pass `--yes` to skip graduate's own rung-2 `[y/N]` — without it, invoked non-interactively with no tty the prompt silently skips and prints only a manual hint, so nothing lands while Phase 5 would wrongly report success. Each run distills the rule into `CLAUDE.md` (mirroring a real-file `AGENTS.md`), archives the source page stamped `graduated_to`, and drops its `MEMORY.md` pointer — so run these **before** the MEMORY.md rewrite below.
+4. **Read MEMORY.md once** (required before Write).
+5. Rewrite MEMORY.md as the tightened index:
    - Group entries by frontmatter `type` (or by topical sections if types aren't consistent): "Current operational state", "Design patterns", "Gotchas / references", "User feedback (preferences)", "Cross-references".
    - Each entry: `- [filename](filename) — one-line hook ≤150 chars`. Strip embedded summaries; the hook is what the user sees in the index, not the memory's full content.
    - Preserve any cross-reference section pointing into other projects' memory dirs.
-5. Run the verification block:
+6. Run the verification block:
 
 ```bash
 cd "$MEM_DIR"
@@ -174,7 +178,23 @@ comm -23 <(ls *.md | sort) <({ echo MEMORY.md; grep -oE '\]\([A-Za-z][A-Za-z0-9_
 
 If any `MISSING:` lines appear, the new MEMORY.md is broken — fix immediately. If orphans appear, decide per file: add the link back, or delete the orphan (with user confirmation).
 
-6. Report the final numbers: files before/after, MEMORY.md bytes before/after, estimated tokens saved per session (~bytes/3.5).
+7. Verify each **graduate** with the same rigor as delete/compress — confirm the rule actually landed and the source actually moved:
+
+```bash
+for slug in $GRADUATED_SLUGS; do
+  echo "=== $slug: rule landed in CLAUDE.md ==="
+  git -C "$REPO_ROOT" diff -- CLAUDE.md AGENTS.md | grep -q '^+' && echo "OK: CLAUDE.md/AGENTS.md gained the rule" || echo "MISSING: no CLAUDE.md diff for $slug"
+  echo "=== $slug: source archived, not left live ==="
+  [ ! -f "$MEM_DIR/$slug.md" ] && [ -f "$MEM_DIR/archive/$slug.md" ] \
+    && grep -q 'graduated_to:' "$MEM_DIR/archive/$slug.md" \
+    && echo "OK: moved to archive/ with graduated_to stamp" \
+    || echo "BROKEN: $slug not cleanly archived (still live, missing, or unstamped)"
+done
+```
+
+A `MISSING:`/`BROKEN:` line here means the graduate did not apply (commonly: `--yes` was omitted so the non-interactive `[y/N]` silently skipped) — re-run `okfmem graduate <slug> --yes` and re-verify before rewriting MEMORY.md's counts.
+
+8. Report the final numbers: files before/after, MEMORY.md bytes before/after, estimated tokens saved per session (~bytes/3.5).
 
 ## Recovery
 

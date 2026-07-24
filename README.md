@@ -205,6 +205,25 @@ Run this anytime to view the wiring status, detected harnesses, and if your stor
 ### 5. Session Search (`okfmem search`)
 An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). This allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.
 
+### 6. Distillation Feed (`okfmem distill`)
+An opt-in plugin — the "consolidation v1.1" reflection pass. It reads the same normalized session-turn corpus as `okfmem search` (already secret-scrubbed and tool-result-free), finds topics that **recur across multiple sessions yet have no durable page**, dedupes them against your existing pages, and prints a *proposed pages* report:
+
+```bash
+okfmem distill --project okfmem     # report only — writes nothing to the store
+```
+
+Two invariants hold by construction. **Zero API calls, zero mandatory deps:** candidate detection is pure-Python heuristics (session-recurrence + a document-frequency ceiling that prunes boilerplate + dedup-against-pages), so it never calls a model — and it is *not* wired into the headless Stop-hook consolidation job, which keeps running with no cost. **Nothing is ever written:** `distill` is a pure reporter. The report is the *feed* to a gate — a model at session end (`/okfmem-save`) or a human — which is the only thing that authors or updates pages. A dry-run reporter by design, not a writer with a `--dry-run` flag.
+
+### 7. Graduation (`okfmem graduate`)
+The forward complement to decay: promoting a durable page that has matured into a house rule — something every session should see, not recall on demand — into the project's `CLAUDE.md`.
+
+```bash
+okfmem graduate my-slug --dry-run   # prints the CLAUDE.md diff + archive move, writes nothing
+okfmem graduate my-slug             # [y/N] confirm, then apply
+```
+
+It distills the source page's body into the target `CLAUDE.md` (default: the project-root file; `--to <dir>/CLAUDE.md` targets a lane-scoped file, seeded on first write), mirrors the same insertion into a sibling `AGENTS.md` **only when it's a real file** — a symlinked `AGENTS.md` (e.g. `AGENTS.md -> CLAUDE.md`) already resolves through, so it's left alone — and then **archives, never deletes**, the source page: moved to `projects/<proj>/archive/`, its `MEMORY.md` line dropped, and its frontmatter stamped with `graduated_to:` (target file + heading anchor + date/PR) so provenance survives and a later curate pass never re-flags or hard-deletes it. Writing outside the store is a rung-2 op, so it sits behind a `[y/N]` confirmation — skippable non-interactively, printing the exact manual command to run later.
+
 ```mermaid
 flowchart TD
     subgraph Harness [AI Coding Agent]
