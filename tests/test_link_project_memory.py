@@ -126,9 +126,11 @@ def test_skip_when_not_a_git_repo(env, monkeypatch):
     assert "git repo" in msg
 
 
-def test_skip_when_store_has_no_project_dir_yet(env, monkeypatch):
+def test_seeds_store_project_when_none_exists_yet(env, monkeypatch):
     # A repo whose derived name ("unlinked") has no store/projects dir yet --
-    # e.g. the very first `init` before any page has ever been authored.
+    # e.g. the very first `init` in a repo before any page has been authored.
+    # This used to be a silent "skip", which made the documented per-repo step
+    # (`cd <repo> && okfmem init`) a no-op exactly where it was needed.
     other_root = env["root"].parent / "unlinked"
     other_root.mkdir()
     monkeypatch.setattr(mi, "_current_git_root", lambda: str(other_root))
@@ -136,8 +138,56 @@ def test_skip_when_store_has_no_project_dir_yet(env, monkeypatch):
     status, msg = mi.link_project_memory(
         env["store"], env["claude_projects"], env["harnesses"],
         {"overrides": {}}, dry_run=False)
-    assert status == "skip"
-    assert "no store project dir" in msg
+    assert status == "changed"
+    assert "seeded" in msg
+
+    target = os.path.join(env["store"], "projects", "unlinked")
+    assert os.path.isdir(target)
+    # Both files the harness auto-loads exist, so the link resolves to
+    # something real rather than an empty directory.
+    assert os.path.isfile(os.path.join(target, "MEMORY.md"))
+    assert os.path.isfile(os.path.join(target, "STATE.md"))
+
+    link = os.path.join(
+        env["claude_projects"], mi.encode_root(str(other_root)), "memory")
+    assert os.path.realpath(link) == os.path.realpath(target)
+
+
+def test_seed_writes_nothing_under_dry_run(env, monkeypatch):
+    other_root = env["root"].parent / "unlinked-dry"
+    other_root.mkdir()
+    monkeypatch.setattr(mi, "_current_git_root", lambda: str(other_root))
+
+    status, msg = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"],
+        {"overrides": {}}, dry_run=True)
+    assert status == "changed"
+    assert "would seed" in msg
+    assert not os.path.exists(
+        os.path.join(env["store"], "projects", "unlinked-dry"))
+
+
+def test_seed_is_idempotent(env, monkeypatch):
+    # Re-running init in a seeded repo reports "ok" and never rewrites the
+    # seed files (a populated MEMORY.md must survive a second init).
+    other_root = env["root"].parent / "reinit"
+    other_root.mkdir()
+    monkeypatch.setattr(mi, "_current_git_root", lambda: str(other_root))
+    kw = dict(dry_run=False)
+    mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"],
+        {"overrides": {}}, **kw)
+
+    memory_md = os.path.join(env["store"], "projects", "reinit", "MEMORY.md")
+    with open(memory_md, "w", encoding="utf-8") as f:
+        f.write("# MEMORY — reinit\n\n- [Real page](real.md) — hook\n")
+
+    status, _ = mi.link_project_memory(
+        env["store"], env["claude_projects"], env["harnesses"],
+        {"overrides": {}}, **kw)
+    assert status == "ok"
+    with open(memory_md, encoding="utf-8") as f:
+        assert "Real page" in f.read()
 
 
 def test_repoints_a_broken_symlink(env):
@@ -367,3 +417,54 @@ def test_honors_registry_override_for_project_name(tmp_path, monkeypatch):
     link = os.path.join(str(claude_projects), encoded, "memory")
     assert os.path.realpath(link) == os.path.realpath(
         os.path.join(str(store), "projects", "renamed"))
+
+
+# ---------------------------------------------------------------------------
+# project_link_state — the read-only probe every reminder surface shares
+# ---------------------------------------------------------------------------
+
+def test_probe_reports_unlinked_before_init(env, monkeypatch):
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: env["harnesses"])
+    state, name = mi.project_link_state(env["store"], env["claude_projects"])
+    assert (state, name) == ("unlinked", "myproj")
+
+
+def test_probe_reports_linked_after_init(env, monkeypatch):
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: env["harnesses"])
+    mi.link_project_memory(env["store"], env["claude_projects"],
+                           env["harnesses"], env["reg"], dry_run=False)
+    state, name = mi.project_link_state(env["store"], env["claude_projects"])
+    assert (state, name) == ("linked", "myproj")
+
+
+def test_probe_reports_unlinked_when_link_points_elsewhere(env, monkeypatch):
+    # A link that resolves to a DIFFERENT project is as broken as no link at
+    # all -- the reminder must fire rather than read it as wired.
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: env["harnesses"])
+    link = _link_path(env)
+    os.makedirs(os.path.dirname(link))
+    os.symlink(str(env["root"].parent), link, target_is_directory=True)
+    state, _ = mi.project_link_state(env["store"], env["claude_projects"])
+    assert state == "unlinked"
+
+
+def test_probe_reports_not_a_repo_outside_git(env, monkeypatch):
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: env["harnesses"])
+    monkeypatch.setattr(mi, "_current_git_root", lambda: None)
+    assert mi.project_link_state(env["store"], env["claude_projects"]) == (
+        "not-a-repo", None)
+
+
+def test_probe_reports_no_claude_without_harness(env, monkeypatch):
+    monkeypatch.setattr(mi, "detect_harnesses", lambda: {"claude_code": None})
+    assert mi.project_link_state(env["store"], env["claude_projects"]) == (
+        "no-claude", None)
+
+
+def test_probe_never_raises(env, monkeypatch):
+    # Fail-open contract: the SessionStart hook calls this, so an OSError from
+    # anywhere inside must collapse to a no-op answer, not a traceback.
+    monkeypatch.setattr(mi, "detect_harnesses",
+                        lambda: (_ for _ in ()).throw(OSError("boom")))
+    assert mi.project_link_state(env["store"], env["claude_projects"]) == (
+        "no-claude", None)

@@ -72,7 +72,7 @@ which routes to the `memory_*.py` modules.
 ```bash
 okfmem status                 # store + per-project page/archive counts, sync + hook health
 okfmem backfill  --dry-run    # stamp decay frontmatter on existing pages
-okfmem init      --dry-run    # pointers + registry wiring
+okfmem init      --dry-run    # per-repo memory link + pointers + registry wiring
 okfmem consolidate --dry-run  # decay + archive stale pages + push
 okfmem sync [-m "<msg>"]      # commit + pull-rebase + push the store (prompts for the message if -m omitted)
 
