@@ -35,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 # Shared git commit+push path (pull-rebase + lock) lives beside this script.
@@ -171,6 +172,53 @@ def load_transcript(args, payload):
 # the green "saved" badge over genuinely uncaptured work. Parsing structure
 # fixes both, because prose can no longer reach any of these fields.
 WORK_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
+
+
+# Writes whose target lands in an ephemeral scratch/temp root are not durable
+# work: issue-body drafts, intermediate scripts, scratch notes. Counting them
+# flips the badge to 'unsaved' over a session that left nothing to capture.
+# Kept tight on purpose — only unambiguous throwaway roots — so the nag-over-
+# lose bias survives for every real path.
+#
+# Design tension: path-sniffing re-introduces a semantic guess. A user who
+# DELIBERATELY saves durable notes into /tmp would have that write ignored — a
+# genuine 'unsaved' silently becomes a no-op, the exact failure the badge's
+# nag-over-lose bias exists to avoid. Mitigation is to keep this set tight (OS
+# temp roots + the harness scratchpad only, never a broad "$HOME/*.md"
+# heuristic); a durable save belongs in the store or a repo, not /tmp, so the
+# residual risk is small and accepted.
+def _ephemeral_roots():
+    roots = [tempfile.gettempdir(), "/tmp", "/private/tmp"]
+    # Claude Code scratchpad, when the harness exposes it. In practice the real
+    # per-session scratchpad already lives UNDER a temp root
+    # (/private/tmp/claude-.../scratchpad), so it is caught by the prefix check
+    # above; this probe covers a harness that relocates the scratchpad outside
+    # the temp roots and exports its path.
+    scratch = os.environ.get("CLAUDE_SCRATCHPAD_DIR")
+    if scratch:
+        roots.append(scratch)
+    return tuple(os.path.normpath(r) for r in roots if r)
+
+
+def is_scratch_path(path):
+    """True if `path` is under a known ephemeral temp/scratch root."""
+    if not isinstance(path, str) or not path:
+        return False
+    p = os.path.normpath(path)
+    for root in _ephemeral_roots():
+        if p == root or p.startswith(root + os.sep):
+            return True
+    # Deliberately NO blanket "any segment named 'scratchpad'" fallback. That
+    # would sweep in a PROJECT-INTERNAL scratchpad/ (a committed docs/scratchpad/
+    # design-notes dir is a common pattern) — a durable edit there would classify
+    # work=False, clear the badge, and silently lose a real uncaptured session,
+    # the exact failure this badge exists to prevent. The real harness scratchpad
+    # lives under a temp root and is already caught above; on any other ambiguity
+    # we return False so the badge nags 'unsaved' (benign) rather than over-match
+    # a durable path (silent loss).
+    return False
+
+
 SAVE_SKILLS = ("okfmem-save", "primer")
 # A Bash command string is still free text: `grep 'git commit'` mentions a
 # commit without making one. So these are matched only at the START of a
@@ -274,7 +322,9 @@ def classify_record(rec):
         command = inp.get("command")
         command = command if isinstance(command, str) else ""
         if name in WORK_TOOLS:
-            work = True
+            path = inp.get("file_path") or inp.get("notebook_path")
+            if not is_scratch_path(path):
+                work = True
         elif name == "Bash":
             if runs_command(command, COMMIT_RE):
                 work = True
@@ -345,7 +395,7 @@ def touched_files(transcript):
             if name not in WORK_TOOLS:
                 continue
             path = inp.get("file_path") or inp.get("notebook_path")
-            if isinstance(path, str) and path:
+            if isinstance(path, str) and path and not is_scratch_path(path):
                 paths.add(path)
     return sorted(paths)
 

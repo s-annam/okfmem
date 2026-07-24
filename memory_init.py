@@ -34,6 +34,7 @@ Store location: --store, else $OKFMEM_STORE, else ~/okfmem-store.
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -1546,6 +1547,134 @@ def _indent(text, prefix):
 
 
 # ---------------------------------------------------------------------------
+# Antigravity (agy) store-path access pre-grant (#42)
+# ---------------------------------------------------------------------------
+# The store (~/okfmem-store) lives OUTSIDE any project workspace, so when an
+# Antigravity agent reads STATE.md / MEMORY.md it hits the per-file "outside
+# workspace" access prompt on every read cycle. Antigravity/gemini records which
+# non-workspace folders are pre-trusted in ~/.gemini/trustedFolders.json -- a
+# flat {absolute_path: TRUST_LEVEL} map (TRUST_LEVEL is TRUST_FOLDER /
+# TRUST_PARENT / DO_NOT_TRUST). A path marked TRUST_FOLDER is read/write
+# accessible without the prompt. So pre-seeding the store path there is the
+# SCOPED (least-privilege) fix -- it grants exactly the store dir, rather than
+# flipping the global `allowNonWorkspaceAccess` switch (which would allow ALL
+# non-workspace reads, far beyond the consent the user gave).
+AGY_TRUST_VALUE = "TRUST_FOLDER"
+
+
+def agy_present():
+    """True when Antigravity is installed: its ~/.gemini home dir exists OR the
+    `agy` binary is on PATH. Same two-part signal detect_harnesses() and
+    detect_skill_dirs() already use, so detection stays consistent."""
+    home = os.path.expanduser("~")
+    return os.path.isdir(os.path.join(home, ".gemini")) or bool(shutil.which("agy"))
+
+
+def _agy_trusted_folders_path():
+    return os.path.join(os.path.expanduser("~"), ".gemini", "trustedFolders.json")
+
+
+def _load_trusted_folders(path):
+    """Read the trustedFolders map. Returns {} on missing/empty/corrupt/wrong-
+    shape file -- never raises, so a malformed hand-edit can't abort an install
+    or uninstall."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_trusted_folders(path, folders):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        try:
+            shutil.copy2(path, path + ".okfmem.bak")
+        except OSError:
+            pass  # backup is best-effort; the write below is the real work
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(folders, f, indent=2)
+        f.write("\n")
+
+
+def agy_grant_state(store):
+    """One-word probe for the installers: 'not-installed' (no agy/~/.gemini),
+    'granted' (store path already TRUST_FOLDER), or 'ungranted'. Read-only, so
+    it never mutates -- the installer branches its prompt copy on the token, the
+    same shape as `--statusline-state`."""
+    if not agy_present():
+        return "not-installed"
+    store = os.path.abspath(os.path.expanduser(store))
+    folders = _load_trusted_folders(_agy_trusted_folders_path())
+    return "granted" if folders.get(store) == AGY_TRUST_VALUE else "ungranted"
+
+
+def grant_agy_store_access(store, dry_run=False):
+    """Pre-grant Antigravity read/write access to the store dir by marking it
+    TRUST_FOLDER in ~/.gemini/trustedFolders.json, so agents stop hitting the
+    per-read 'outside workspace' prompt on memory pages. Idempotent and scoped to
+    exactly the store path (does NOT flip the global allowNonWorkspaceAccess).
+    No-op with a note when Antigravity isn't installed. This is a rung-2 outward
+    config mutation -- the CALLER owns the [y/N]/--yes consent gate (the
+    installers' offer_agy_grant, mirroring offer_statusline_badge)."""
+    store = os.path.abspath(os.path.expanduser(store))
+    if not agy_present():
+        print("   agy / Antigravity not detected -- nothing to grant.")
+        return
+    path = _agy_trusted_folders_path()
+    folders = _load_trusted_folders(path)
+    if folders.get(store) == AGY_TRUST_VALUE:
+        print(f"=> agy / Antigravity already has access to {store}.")
+        return
+    if dry_run:
+        print(f"[dry-run] would grant agy access to {store} via {path}")
+        return
+    folders[store] = AGY_TRUST_VALUE
+    _write_trusted_folders(path, folders)
+    print(f"=> Granted agy / Antigravity access to {store}.")
+
+
+def revoke_agy_store_access(store, dry_run=False):
+    """Uninstall cleanup: remove the store's TRUST_FOLDER entry we added to
+    ~/.gemini/trustedFolders.json. Removes ONLY our own entry (value
+    TRUST_FOLDER) for exactly this store path -- a user's manual TRUST_PARENT /
+    DO_NOT_TRUST on that path, and every other folder's trust, are left
+    untouched. No-op when the file or entry is absent."""
+    store = os.path.abspath(os.path.expanduser(store))
+    path = _agy_trusted_folders_path()
+    if not os.path.exists(path):
+        return
+    folders = _load_trusted_folders(path)
+    if folders.get(store) != AGY_TRUST_VALUE:
+        return
+    if dry_run:
+        print(f"[dry-run] would revoke agy access to {store} in {path}")
+        return
+    del folders[store]
+    _write_trusted_folders(path, folders)
+    print(f"=> Revoked agy / Antigravity access to {store}.")
+
+
+def cmd_grant_agy(store, dry_run=False):
+    """`okfmem init --grant-agy`: the installers' opt-in entry point (and the
+    manual command printed for non-interactive/CI installs)."""
+    grant_agy_store_access(store, dry_run=dry_run)
+
+
+def cmd_revoke_agy(store, dry_run=False):
+    """`okfmem init --revoke-agy`: the uninstallers' cleanup entry point (and the
+    manual command a user can run to undo the grant by hand)."""
+    revoke_agy_store_access(store, dry_run=dry_run)
+
+
+def cmd_agy_grant_state(store):
+    """`okfmem init --agy-grant-state`: print the one-word probe on stdout so
+    install.sh/install.ps1 branch their prompt on it. Prints ONLY the token."""
+    print(agy_grant_state(store))
+
+
+# ---------------------------------------------------------------------------
 # SessionStart store-pull hook (cross-machine sync)
 # ---------------------------------------------------------------------------
 # Pre-#16, the ONLY way this hook existed was a hand-added `git -C <path> pull
@@ -2124,7 +2253,92 @@ def update_nudge():
     return None
 
 
-def cmd_status(store):
+# ---------------------------------------------------------------------------
+# Per-project inventory (content half of `okfmem status`)
+# ---------------------------------------------------------------------------
+# `MEMORY.md`'s first this-many lines auto-load into the agent; pointers past it
+# silently stop reaching the model, so a project over the cap is the one signal
+# `okfmem status` must surface (a `/okfmem-curate` candidate). Named, not a
+# literal, so the threshold has one home.
+MEMORY_AUTOLOAD_LINES = 200
+
+
+def project_inventory(store):
+    """Per-project content inventory of the store.
+
+    Returns a list of
+    ``(name, pages, archived, memory_lines, has_state, has_archive_dir)``
+    tuples, one per directory under ``<store>/projects/``, sorted by name.
+
+    Counting rules (must match the skill's intent):
+      * ``MEMORY.md`` and ``STATE.md`` are index/state files, NOT pages.
+      * ``archived`` counts ``archive/*.md``; a MISSING ``archive/`` reports 0
+        but stays distinguishable via ``has_archive_dir`` (the shell version
+        conflated the two and errored on the unquoted glob).
+      * ``memory_lines`` is the ``MEMORY.md`` line count (0 when absent).
+
+    Pure stdlib, read-only. A missing ``projects/`` dir returns ``[]``.
+    """
+    root = os.path.join(store, "projects")
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for name in sorted(os.listdir(root)):
+        d = os.path.join(root, name)
+        if not os.path.isdir(d):
+            continue
+        # glob.escape the directory so a project name containing a glob
+        # metacharacter can't corrupt the "*.md" match; the pattern tail stays
+        # literal on every platform (no shell = no unquoted-glob footgun).
+        pages = [
+            f
+            for f in glob.glob(os.path.join(glob.escape(d), "*.md"))
+            if os.path.basename(f) not in ("MEMORY.md", "STATE.md")
+        ]
+        adir = os.path.join(d, "archive")
+        archived = glob.glob(os.path.join(glob.escape(adir), "*.md"))
+        mem = os.path.join(d, "MEMORY.md")
+        lines = 0
+        if os.path.exists(mem):
+            with open(mem, "r", encoding="utf-8", errors="replace") as f:
+                lines = sum(1 for _ in f)
+        out.append(
+            (
+                name,
+                len(pages),
+                len(archived),
+                lines,
+                os.path.exists(os.path.join(d, "STATE.md")),
+                os.path.isdir(adir),
+            )
+        )
+    return out
+
+
+def project_for_cwd(reg):
+    """Project name for the git root containing the cwd, or ``None``.
+
+    Reuses the ``{git-root: project}`` map ``cmd_status`` already builds via
+    ``build_registry`` -- resolving cwd -> project is one normalized lookup.
+    Not in a git repo, or an unregistered root -> ``None`` (print nothing extra
+    rather than guessing). Read-only: ``git rev-parse`` is a local query, no
+    network, no writes."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    root = os.path.normpath(r.stdout.strip())
+    return reg.get("map", {}).get(root)
+
+
+def cmd_status(store, show_all=False, project_filter=None):
     home = os.path.expanduser("~")
     harnesses = detect_harnesses()
     reg_path = os.path.join(store, "registry.json")
@@ -2163,6 +2377,58 @@ def cmd_status(store):
         f"({cats['path']} path-swap, {cats['notice']} notice, "
         f"{cats['review']} review)"
     )
+
+    # --- Per-project inventory (content half; read-only). Placed AFTER the
+    # wiring lines above and BEFORE `skills:` -- content first, then wiring.
+    inv = project_inventory(store)
+    cwd_project = project_for_cwd(reg)
+    print(f"\n  projects ({len(inv)}):")
+    if project_filter is not None:
+        shown = [row for row in inv if row[0] == project_filter]
+        if not shown:
+            print(f"    (no project named {project_filter})")
+    elif show_all:
+        shown = inv
+    else:
+        # Default view: the cwd's project plus any project over the auto-load
+        # cap (the only rows that need acting on); collapse the rest.
+        shown = [
+            row
+            for row in inv
+            if row[0] == cwd_project or row[3] > MEMORY_AUTOLOAD_LINES
+        ]
+    for name, pages, archived, mem_lines, has_state, _has_arch in shown:
+        marker = "*" if name == cwd_project else " "
+        state = "yes" if has_state else "no"
+        flag = ""
+        if mem_lines > MEMORY_AUTOLOAD_LINES:
+            flag = (
+                f"   {glyph('warn')} over {MEMORY_AUTOLOAD_LINES}-line "
+                "auto-load limit"
+            )
+        print(
+            f"  {marker} {name:20} pages:{pages:<4} "
+            f"MEMORY.md:{mem_lines:<4} archived:{archived:<4} "
+            f"STATE:{state}{flag}"
+        )
+    if project_filter is None and not show_all:
+        hidden = len(inv) - len(shown)
+        if hidden > 0:
+            print(f"    + {hidden} more (okfmem status --all)")
+
+    # Decay epoch -- the cold-start guard consolidation writes on first apply.
+    decay_path = os.path.join(store, "decay_state.json")
+    epoch = None
+    if os.path.exists(decay_path):
+        try:
+            with open(decay_path, "r", encoding="utf-8") as f:
+                epoch = json.load(f).get("epoch")
+        except (OSError, ValueError):
+            epoch = None
+    if epoch:
+        print(f"  decay: epoch {epoch}")
+    else:
+        print("  decay: not yet run on this machine")
 
     sk = link_skills(dry_run=True)
     if sk:
@@ -2334,12 +2600,46 @@ def main():
         "the installers to ask the right question before wiring.",
     )
     ap.add_argument(
+        "--grant-agy",
+        action="store_true",
+        help="opt-in: pre-grant Antigravity (agy) read/write access to the "
+        "store dir by marking it TRUST_FOLDER in ~/.gemini/trustedFolders.json, "
+        "so agents stop hitting the per-read 'outside workspace' prompt on "
+        "memory pages. The installer offers this interactively; run it by hand "
+        "for a non-interactive/CI install.",
+    )
+    ap.add_argument(
+        "--revoke-agy",
+        action="store_true",
+        help="remove the store's Antigravity TRUST_FOLDER grant from "
+        "~/.gemini/trustedFolders.json (undoes --grant-agy). Used by the "
+        "uninstallers; safe to run by hand.",
+    )
+    ap.add_argument(
+        "--agy-grant-state",
+        action="store_true",
+        help="print a one-word probe of the Antigravity grant "
+        "(not-installed|granted|ungranted) for the store and exit -- read-only, "
+        "used by the installers to ask the right question before granting.",
+    )
+    ap.add_argument(
         "--project-link-state",
         action="store_true",
         help="print a one-word probe of whether the CURRENT repo is wired to "
         "the store (linked|unlinked|not-a-repo|no-claude) plus the resolved "
         "project name, and exit -- read-only, used by the hook and skills to "
         "remind you to run `okfmem init` in a new repo.",
+    )
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="with `status`: list EVERY project in the inventory (default "
+        "collapses to the current project + any over the auto-load limit).",
+    )
+    ap.add_argument(
+        "--project",
+        metavar="NAME",
+        help="with `status`: show the inventory for only this one project.",
     )
     ap.add_argument(
         "--store",
@@ -2365,13 +2665,29 @@ def main():
         cmd_wire_statusline(args.dry_run)
         return
 
+    if args.agy_grant_state:
+        # Pure read; needs the store PATH but not its shape, so it runs BEFORE
+        # the projects/ check -- an unconfigured box still answers.
+        cmd_agy_grant_state(args.store)
+        return
+
+    if args.grant_agy:
+        # Targeted opt-in step; mutates ~/.gemini only, independent of store shape.
+        cmd_grant_agy(args.store, dry_run=args.dry_run)
+        return
+
+    if args.revoke_agy:
+        # Uninstall cleanup; mutates ~/.gemini only, independent of store shape.
+        cmd_revoke_agy(args.store, dry_run=args.dry_run)
+        return
+
     store = os.path.abspath(os.path.expanduser(args.store))
     if not os.path.isdir(os.path.join(store, "projects")):
         print(f"error: no projects/ under {store}", file=sys.stderr)
         sys.exit(2)
 
     if args.status:
-        cmd_status(store)
+        cmd_status(store, show_all=args.all, project_filter=args.project)
     else:
         cmd_run(
             store,

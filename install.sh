@@ -255,6 +255,40 @@ offer_statusline_badge() {
 }
 offer_statusline_badge || true
 
+# 6. Optional: pre-grant Antigravity (agy) access to the store dir. The store
+# lives outside any project workspace, so agy prompts on every memory read
+# ("outside workspace"). Marking the store TRUST_FOLDER in
+# ~/.gemini/trustedFolders.json stops that -- outward config, so gated on an
+# explicit yes and an interactive terminal (skip cleanly + print the manual
+# command when piped). Only offered when agy is actually installed.
+offer_agy_grant() {
+    # Probe first (read-only): not-installed -> no agy, skip silently; granted ->
+    # already done, note it; ungranted -> offer. Mirrors offer_statusline_badge.
+    local state
+    state="$( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --agy-grant-state --store "$STORE_DIR" 2>/dev/null )"
+    case "$state" in
+        not-installed|"")
+            return 0 ;;  # agy absent (or old engine) -- nothing to offer
+        granted)
+            echo "=> agy / Antigravity already has access to $STORE_DIR."
+            return 0 ;;
+    esac
+    if [ ! -t 0 ]; then
+        # Non-interactive (piped/CI): take the documented default (SKIP) and
+        # print the exact manual command to grant it later.
+        echo "=> agy / Antigravity detected. Grant it access to the store later with:"
+        echo "     okfmem init --grant-agy"
+        return 0
+    fi
+    printf "Grant agy / Antigravity access permissions for okfmem-store (%s)? [y/N] " "$STORE_DIR"
+    read -r ans
+    case "$ans" in
+        [Yy]*) ( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --grant-agy --store "$STORE_DIR" ) ;;
+        *) echo "   Skipped. Grant it later with:  okfmem init --grant-agy" ;;
+    esac
+}
+offer_agy_grant || true
+
 echo ""
 echo "✅ okfmem installation complete!"
 echo ""

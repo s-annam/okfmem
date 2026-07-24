@@ -10,7 +10,7 @@ Read-only status + orientation for the okfmem memory system. It answers "what is
 the state of my memory, and how do the pieces fit together" without touching
 anything. Two modes:
 
-- **`/okfmem`** (no arg) → the **status dashboard** (Steps 1–5 below).
+- **`/okfmem`** (no arg) → the **status dashboard** (Steps 1–3 below).
 - **`/okfmem usage`** → the **how-to** (the "Usage" section at the end): what each
   mechanism does, when it fires, and which skill/command to reach for.
 
@@ -68,71 +68,53 @@ command run from the repo root — `okfmem init` (it seeds the store project dir
 too, so a never-saved repo wires up in that single step). `not-a-repo` /
 `no-claude` are informational, not problems.
 
-### Step 2: Store inventory
+### Step 2: Store inventory + decay state
 
-```bash
-STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
-for d in "$STORE"/projects/*/; do
-  name=$(basename "$d")
-  pages=$(ls "$d"/*.md 2>/dev/null | grep -vcE '/(MEMORY|STATE)\.md$')
-  mem=$( [ -f "$d/MEMORY.md" ] && wc -l < "$d/MEMORY.md" | tr -d ' ' || echo 0 )
-  arch=$(ls "$d"/archive/*.md 2>/dev/null | wc -l | tr -d ' ')
-  state=$( [ -f "$d/STATE.md" ] && echo yes || echo no )
-  printf "  %-24s pages:%-4s MEMORY.md:%-4s archived:%-4s STATE:%s\n" "$name" "$pages" "$mem" "$arch" "$state"
-done
+`okfmem status` (Step 1) already prints the per-project inventory and decay
+epoch — it is a pure-Python part of the engine, so it renders identically on
+macOS and Windows. **Do not re-derive this in shell.** Relay the section it
+prints:
+
+```
+  projects (14):
+  * okfmem              pages:27   MEMORY.md:33   archived:0    STATE:yes
+    tools               pages:158  MEMORY.md:202  archived:0    STATE:yes   ! over 200-line auto-load limit
+    + 11 more (okfmem status --all)
+  decay: epoch 2026-07-16
 ```
 
-Flag any project whose `MEMORY.md` exceeds ~200 lines (auto-load truncation
-point) — candidate for `/okfmem-curate`.
+- The `*` marks the project the current working directory maps to.
+- Any project whose `MEMORY.md` exceeds the 200-line auto-load limit is flagged
+  inline (`! over 200-line auto-load limit`) — a candidate for `/okfmem-curate`.
+- The default view collapses to the current project plus any over-limit
+  project. When the user wants the **full** list, re-run
+  `python3 ~/okfmem/okfmem status --all`; for a single project,
+  `python3 ~/okfmem/okfmem status --project <name>`.
+- The `decay:` line reports the `decay_state.json` epoch (the cold-start guard
+  the consolidation job uses so a freshly-cloned store doesn't mass-archive on
+  first run), or `not yet run on this machine` when the file is absent.
 
-### Step 3: Decay / consolidation state
+### Step 3: Hook + skill wiring health
 
-```bash
-STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
-cat "$STORE/decay_state.json" 2>/dev/null || echo "  no decay_state.json (consolidation not yet run on this machine)"
-```
+`okfmem status` also prints the wiring half cross-platform — relay it rather
+than shelling out:
 
-`decay_state.json` holds the cold-start EPOCH guard the consolidation job uses so
-a freshly-cloned store doesn't mass-archive on first run.
+- `stop hook:` / `pull hook:` — `wired` is healthy; anything else means
+  `okfmem init` hasn't run (or a legacy hook needs healing).
+- `skills:` — per-harness canonical skill counts, with
+  `(N not linked — run okfmem init)` when any are pending.
+- `store sync:` — the store's git state (clean/in-sync, or dirty/unpushed/behind
+  with the `okfmem sync` fix).
+- An engine-update nudge appears at the end when a newer `okfmem` is available.
 
-### Step 4: Git sync status (both repos)
-
-```bash
-for r in "$HOME/okfmem" "${OKFMEM_STORE:-$HOME/okfmem-store}"; do
-  echo "== $r =="
-  git -C "$r" status -sb | head -1
-  git -C "$r" log -1 --format='  last: %h %s (%cr)'
-done
-```
-
-Call out ahead/behind or a dirty tree — a dirty store means the next `okfmem
-sync` will sweep those changes in.
-
-### Step 5: Hook + skill wiring health
-
-```bash
-echo "== Stop/SessionStart hooks =="
-grep -oE 'memory_consolidate\.py|okfmem-store. pull --rebase' ~/.claude/settings.json | sort -u
-echo "== skill symlinks =="
-for h in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.gemini/config/skills"; do
-  [ -d "$h" ] || continue
-  for s in okfmem okfmem-save okfmem-curate primer memory-curate; do
-    [ -e "$h/$s" ] && printf "  %s/%s -> %s\n" "${h/#$HOME/~}" "$s" "$(readlink "$h/$s" 2>/dev/null || echo '(real)')"
-  done
-done
-```
-
-Confirm: Stop hook has `memory_consolidate.py`, SessionStart has the store
-`pull --rebase`, and each harness has both the canonical `okfmem-*` skills and
-the `primer`/`memory-curate` aliases. Missing canonical symlinks → tell the user
-to run `okfmem init`.
+Missing canonical skills or an unwired hook → tell the user to run `okfmem init`.
 
 ### Summarize
 
-Close with a 3–5 line health summary: how many projects, total pages, anything
-over the MEMORY.md line cap, sync state of both repos, and any wiring gap with
-the one command that fixes it (`okfmem init` for skills, a manual `git pull` for
-drift).
+Close with a 3–5 line health summary: how many projects, anything over the
+`MEMORY.md` line cap (from the flagged rows), the store sync state, and any
+wiring gap with the one command that fixes it (`okfmem init` for skills/hooks,
+`okfmem sync` for a dirty store).
 
 ## Usage (`/okfmem usage`)
 
