@@ -160,32 +160,177 @@ def load_transcript(args, payload):
 # writes are best-effort and NON-fatal — a badge is a convenience, never a
 # gate — and run BEFORE the dirty-tree skip so the badge stays fresh even on a
 # turn where consolidation itself defers. Opt out with OKFMEM_NO_STATUS=1.
-WORK_RE = re.compile(r'"name":\s*"(?:Edit|Write|NotebookEdit)"')
-COMMIT_RE = re.compile(r"git\s+commit\b")
-SAVE_RE = re.compile(r"okfmem[- ]save|okfmem\s+sync\b")
-FILE_PATH_RE = re.compile(r'"file_path":\s*"([^"]+)"')
+#
+# Signals are read from the transcript's STRUCTURE (tool_use blocks, user-
+# authored text), never from its raw bytes. An earlier version regexed the
+# JSONL as flat text, which matched the same words wherever they appeared —
+# in a user message, in assistant prose, or inside the contents of any file
+# read into context. That was wrong in both directions, and badly so in one:
+# a session whose last real edit was followed by the mere phrase
+# "/okfmem-save" (this repo's own docs and CLAUDE.md both contain it) rendered
+# the green "saved" badge over genuinely uncaptured work. Parsing structure
+# fixes both, because prose can no longer reach any of these fields.
+WORK_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
+SAVE_SKILLS = ("okfmem-save", "primer")
+# A Bash command string is still free text: `grep 'git commit'` mentions a
+# commit without making one. So these are matched only at the START of a
+# pipeline segment, i.e. in command position, where the word is the program
+# being run rather than an argument being searched for.
+COMMIT_RE = re.compile(r"git(?:\s+-\S*(?:\s+[^\s-]\S*)?)*\s+commit\b")
+SAVE_BASH_RE = re.compile(r"okfmem\s+sync\b|okfmem-save\b")
+# Quoted spans are data, not code — blanked BEFORE segmenting, because a
+# separator inside a quoted regex (`grep 'a\|b'`) would otherwise split there
+# and leave the quote's tail sitting in apparent command position.
+QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+# Split on shell separators, then strip leading `(`, env assignments and
+# wrappers so `cd x && FOO=1 git commit` still resolves to a commit.
+SEGMENT_RE = re.compile(r"\|\||&&|[;\n|]")
+LEAD_RE = re.compile(r"^[\s(]*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:sudo|command|nohup)\s+)*")
+# The user invoking the skill — as a bare slash command or via Claude Code's
+# `<command-name>` envelope. Anchored so a mention mid-sentence never counts.
+SAVE_CMD_RE = re.compile(r"(?:^|<command-name>)\s*/(?:okfmem-save|primer)\b",
+                         re.MULTILINE)
+
+
+def iter_tool_uses(node):
+    """Yield (name, input_dict) for every tool_use block anywhere in a record.
+
+    Walks the parsed structure at any depth, so it works on both a full
+    Claude Code envelope ({"type":"assistant","message":{"content":[...]}})
+    and a bare block. Recursion descends only into parsed dicts/lists, never
+    into strings — which is precisely what isolates us from file contents: a
+    tool_result carrying a file that happens to contain `"name": "Edit"` holds
+    it as an opaque string, so it can never be mistaken for a real tool call.
+    """
+    if isinstance(node, dict):
+        name = node.get("name")
+        inp = node.get("input")
+        if isinstance(name, str) and (node.get("type") == "tool_use"
+                                      or isinstance(inp, dict)):
+            yield name, inp if isinstance(inp, dict) else {}
+        for value in node.values():
+            yield from iter_tool_uses(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from iter_tool_uses(value)
+
+
+def user_text(rec):
+    """Concatenate the plain-text blocks of a USER-authored message.
+
+    Claude Code carries tool RESULTS in user-role messages too; those arrive as
+    `tool_result` blocks and are deliberately skipped, so a command's own output
+    echoing "/okfmem-save" can't be read as the user invoking it.
+    """
+    if not isinstance(rec, dict) or rec.get("type") != "user":
+        return ""
+    message = rec.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(b.get("text", "") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str))
+
+
+def runs_command(command, pattern):
+    """True if `pattern` matches in COMMAND POSITION of any pipeline segment.
+
+    Anchoring at a segment start is what separates running something from
+    merely naming it: `git commit -m x` matches, `grep -o 'git commit'` and
+    `echo "run git commit"` do not. Quoting is not parsed, so a command buried
+    in `bash -c "..."` is missed — deliberate, since the dominant work signal
+    is the exact Edit/Write tool set and a miss here only costs a nag.
+    """
+    for segment in SEGMENT_RE.split(QUOTED_RE.sub(" ", command or "")):
+        if pattern.match(LEAD_RE.sub("", segment)):
+            return True
+    return False
+
+
+def classify_record(rec):
+    """-> (is_work, is_save) for one parsed transcript record."""
+    work = save = False
+    for name, inp in iter_tool_uses(rec):
+        command = inp.get("command")
+        command = command if isinstance(command, str) else ""
+        if name in WORK_TOOLS:
+            work = True
+        elif name == "Bash":
+            if runs_command(command, COMMIT_RE):
+                work = True
+            if runs_command(command, SAVE_BASH_RE):
+                save = True
+        elif name == "Skill" and inp.get("skill") in SAVE_SKILLS:
+            save = True
+    if SAVE_CMD_RE.search(user_text(rec)):
+        save = True
+    return work, save
+
+
+def iter_records(transcript):
+    """Yield (line_index, parsed record) for each JSONL line that parses.
+
+    Unparseable lines are skipped rather than fatal — same best-effort spirit
+    as access tracking; a truncated or garbled transcript degrades to less
+    signal, never to a crash.
+    """
+    for index, line in enumerate((transcript or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        yield index, record
 
 
 def compute_save_state(transcript):
     """Classify this session for the badge: 'unsaved' | 'saved' | None.
 
-    'unsaved' — real work (an Edit/Write/NotebookEdit tool use or a git commit)
-    happened with no LATER `/okfmem-save`. 'saved' — a save ran after the last
-    work. None — no work this session (badge cleared). Position-based (last work
-    vs last save) so re-editing after a save flips correctly back to 'unsaved'.
-    Regex over the raw JSONL — same best-effort spirit as access tracking; a
-    missing or garbled transcript just yields None.
+    'unsaved' — real work (an Edit/Write/NotebookEdit tool use or a Bash
+    `git commit`) happened with no LATER save. 'saved' — a save ran after the
+    last work. None — no work this session (badge cleared). Position-based on
+    LINE INDEX (last work vs last save) so re-editing after a save flips
+    correctly back to 'unsaved'.
+
+    Work and save on the same record resolve to 'unsaved': the tie breaks
+    toward nagging, because a false 'unsaved' costs a redundant save while a
+    false 'saved' silently loses the session.
     """
     if not transcript:
         return None
-    work_pos = max((m.start() for m in WORK_RE.finditer(transcript)), default=-1)
-    work_pos = max(work_pos,
-                   max((m.start() for m in COMMIT_RE.finditer(transcript)),
-                       default=-1))
+    work_pos = save_pos = -1
+    for index, record in iter_records(transcript):
+        is_work, is_save = classify_record(record)
+        if is_work:
+            work_pos = index
+        if is_save:
+            save_pos = index
     if work_pos < 0:
         return None
-    save_pos = max((m.start() for m in SAVE_RE.finditer(transcript)), default=-1)
     return "saved" if save_pos > work_pos else "unsaved"
+
+
+def touched_files(transcript):
+    """Sorted paths of files actually written this session, for the breadcrumb.
+
+    Structural for the same reason as the badge: the old `"file_path": "..."`
+    regex over raw text also matched paths quoted inside a file's contents or
+    in prose, listing files the session never touched.
+    """
+    paths = set()
+    for _, record in iter_records(transcript):
+        for name, inp in iter_tool_uses(record):
+            if name not in WORK_TOOLS:
+                continue
+            path = inp.get("file_path") or inp.get("notebook_path")
+            if isinstance(path, str) and path:
+                paths.add(path)
+    return sorted(paths)
 
 
 def status_file_path():
@@ -224,7 +369,7 @@ def write_breadcrumb(store, cwd, transcript, today):
     try:
         if os.path.islink(path):
             return
-        touched = sorted(set(FILE_PATH_RE.findall(transcript or "")))
+        touched = touched_files(transcript)
         lines = [f"# okfmem session trail — {today.isoformat()}", ""]
         if cwd:
             lines.append(f"- cwd: {cwd}")
