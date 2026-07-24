@@ -233,7 +233,7 @@ Scans your system for supported harnesses (Claude Code, Antigravity) and writes 
 An idempotent tool that stamps required YAML frontmatter (like `importance`, `pinned`, `created`) onto all durable pages. (The `install.sh` script runs this automatically).
 
 ### 4. Status Check (`okfmem status`)
-Run this anytime to view the wiring status, detected harnesses, and if your store has any uncommitted changes.
+Run this anytime to view the wiring status, detected harnesses, and whether your store has any uncommitted changes. It also prints a per-project inventory — page and archive counts, `MEMORY.md` line count, and `STATE.md` presence — marking the project your current directory maps to (`*`) and flagging any project whose `MEMORY.md` has grown past the 200-line auto-load limit (a `/okfmem-curate` candidate), plus the decay epoch. The default view collapses to the current project and any over-limit project; add `--all` to list every project, or `--project <name>` for one.
 
 ### 5. Session Search (`okfmem search`)
 An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). This allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.

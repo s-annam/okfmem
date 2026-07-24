@@ -313,6 +313,37 @@ function Set-StatuslineBadge {
 }
 Set-StatuslineBadge
 
+# Optional: pre-grant Antigravity (agy) access to the store dir. The store lives
+# outside any project workspace, so agy prompts on every memory read ("outside
+# workspace"). Marking the store TRUST_FOLDER in ~/.gemini/trustedFolders.json
+# stops that -- outward config, so gated on an explicit yes; Read-PromptAnswer
+# returns $null under -NonInteractive so a piped install skips cleanly (and
+# prints the manual command). Only offered when agy is actually installed.
+function Set-AgyGrant {
+    param([string]$StoreDir)
+    # Probe first (read-only): not-installed -> no agy, skip silently; granted ->
+    # already done, note it; ungranted -> offer. Mirrors Set-StatuslineBadge.
+    $state = (& $PyCmd (Join-Path $EngineDir "memory_init.py") --agy-grant-state --store "$StoreDir" 2>$null | Select-Object -First 1)
+    switch -Regex ($state) {
+        '^not-installed$' { return }  # agy absent -- nothing to offer
+        '^granted$'       { Write-Host "=> agy / Antigravity already has access to $StoreDir."; return }
+    }
+    $ans = Read-PromptAnswer "Grant agy / Antigravity access permissions for okfmem-store ($StoreDir)? [y/N]"
+    if ($null -eq $ans) {
+        # Non-interactive (piped/CI): take the documented default (SKIP) and print
+        # the exact manual command to grant it later.
+        Write-Host "=> agy / Antigravity detected. Grant it access to the store later with:"
+        Write-Host "     okfmem init --grant-agy"
+        return
+    }
+    if ($ans -match '^[Yy]') {
+        & $PyCmd (Join-Path $EngineDir "memory_init.py") --grant-agy --store "$StoreDir"
+    } else {
+        Write-Host "   Skipped. Grant it later with:  okfmem init --grant-agy"
+    }
+}
+Set-AgyGrant $StoreDir
+
 Write-Host ""
 Write-Host "okfmem installation complete!"
 Write-Host ""

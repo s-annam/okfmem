@@ -137,6 +137,18 @@ else
     python3 "$UNINSTALL_PY" --store "$STORE_DIR"
 fi
 
+# 2.5 Revoke the Antigravity (agy) store-path grant ---------------------------
+# Removes the store's TRUST_FOLDER entry install.sh added to
+# ~/.gemini/trustedFolders.json (#42). This is okfmem-managed harness wiring, so
+# it's covered by the up-front rung-2 gate; memory_init.py --revoke-agy removes
+# ONLY our own entry for this exact store path (a user's manual trust on that
+# path, and every other folder, are left alone) and no-ops when absent.
+if [ "$DRY_RUN" -eq 1 ]; then
+    ( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --revoke-agy --dry-run --store "$STORE_DIR" )
+else
+    ( cd "$ENGINE_DIR" && python3 "$ENGINE_DIR/memory_init.py" --revoke-agy --store "$STORE_DIR" )
+fi
+
 # 3. Delink the store remote (opt-in, rung-2) ---------------------------------
 # The store and its full history stay on disk either way -- this only drops
 # the `origin` remote pointer. Skip cleanly if there's no remote to delink, or

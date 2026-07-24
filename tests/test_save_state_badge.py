@@ -4,6 +4,7 @@ the git-ignored breadcrumb.
 """
 import json
 import os
+import tempfile
 from datetime import date
 
 import memory_consolidate as mc
@@ -14,6 +15,11 @@ import memory_consolidate as mc
 # ---------------------------------------------------------------------------
 def _edit(fp="/x/y.py"):
     return f'{{"type":"tool_use","name":"Edit","input":{{"file_path":"{fp}"}}}}'
+
+
+def _write(fp):
+    return json.dumps({"type": "tool_use", "name": "Write",
+                       "input": {"file_path": fp}})
 
 
 def _bash(command):
@@ -86,6 +92,101 @@ def test_work_and_save_in_same_record_ties_to_unsaved():
         {"type": "tool_use", "name": "Skill", "input": {"skill": "okfmem-save"}},
     ]}})
     assert mc.compute_save_state(t) == "unsaved"
+
+
+# ---------------------------------------------------------------------------
+# scratch writes are not durable work — false-'unsaved' fix (#49)
+# ---------------------------------------------------------------------------
+def test_scratch_only_session_is_cleared_not_unsaved():
+    # A session whose only writes land in the scratchpad / temp roots left
+    # nothing to capture (e.g. issue-body drafts): badge cleared, not amber.
+    # The real Claude scratchpad lives UNDER a temp root, so it is caught by the
+    # ephemeral-root prefix check — not by any blanket 'scratchpad'-segment rule.
+    t = "\n".join([
+        _write("/tmp/issue-body-49.md"),
+        _write("/private/tmp/claude-501/enc/session/scratchpad/draft.md"),
+    ])
+    assert mc.compute_save_state(t) is None
+
+
+def test_project_internal_scratchpad_is_unsaved_not_cleared():
+    # A committed docs/scratchpad/ (or any project-internal 'scratchpad/' dir)
+    # is NOT ephemeral: a durable edit there must nag 'unsaved', never be swept
+    # in and silently lost. Regression guard for the over-broad segment match.
+    t = _write(os.path.join("/home/whoever/proj", "scratchpad", "note.md"))
+    assert mc.is_scratch_path("/home/whoever/proj/scratchpad/note.md") is False
+    assert mc.compute_save_state(t) == "unsaved"
+
+
+def test_scratch_plus_real_write_is_unsaved():
+    # One real repo write among scratch writes still nags — bias preserved.
+    t = "\n".join([
+        _write("/tmp/scratch.md"),
+        _write("/repo/src/real.py"),
+    ])
+    assert mc.compute_save_state(t) == "unsaved"
+
+
+def test_scratch_plus_git_commit_is_unsaved():
+    # commit detection is untouched: committing is always real work regardless
+    # of any file path, even if every Write this session was to scratch.
+    t = "\n".join([
+        _write("/tmp/scratch.md"),
+        _bash("git commit -m wip"),
+    ])
+    assert mc.compute_save_state(t) == "unsaved"
+
+
+def test_save_after_real_write_still_saved_with_scratch_present():
+    t = "\n".join([
+        _write("/tmp/scratch.md"),
+        _edit("/repo/a.py"),
+        _bash("okfmem sync"),
+    ])
+    assert mc.compute_save_state(t) == "saved"
+
+
+def test_tmpdir_is_respected_via_gettempdir():
+    # macOS $TMPDIR lives under /var/folders/..., not /tmp — gettempdir() must
+    # catch it. Build a path under the actual tempdir so this holds anywhere.
+    fp = os.path.join(tempfile.gettempdir(), "okfmem-scratch-49.md")
+    assert mc.is_scratch_path(fp) is True
+    assert mc.compute_save_state(_write(fp)) is None
+
+
+def test_is_scratch_path_handles_malformed_input():
+    # No crash on None / empty / non-string tool input.
+    assert mc.is_scratch_path(None) is False
+    assert mc.is_scratch_path("") is False
+    assert mc.is_scratch_path(123) is False
+    assert mc.is_scratch_path(["/tmp/x"]) is False
+
+
+def test_is_scratch_path_true_and_false_cases():
+    assert mc.is_scratch_path("/tmp/x.md") is True
+    assert mc.is_scratch_path("/private/tmp/y.md") is True
+    # The real per-session scratchpad sits UNDER a temp root — caught by prefix.
+    assert mc.is_scratch_path("/private/tmp/claude-501/enc/scratchpad/c.md") is True
+    # A real repo path is not scratch; nor is a path merely NAMED like one; nor
+    # is a project-internal scratchpad/ dir nested arbitrarily deep in the tree.
+    assert mc.is_scratch_path("/repo/src/main.py") is False
+    assert mc.is_scratch_path("/repo/tmpfile.py") is False
+    assert mc.is_scratch_path("/repo/scratchpad.md") is False
+    assert mc.is_scratch_path("/repo/docs/scratchpad/architecture-decision.md") is False
+
+
+def test_touched_files_omits_scratch_paths():
+    # Temp-root writes are omitted; a project-internal scratchpad/ path is a
+    # durable edit and is RETAINED (not swept in by a blanket segment match).
+    t = "\n".join([
+        _write("/repo/real.py"),
+        _write("/tmp/draft.md"),
+        _write("/private/tmp/claude-501/enc/scratchpad/note.md"),
+        _write("/repo/docs/scratchpad/adr.md"),
+    ])
+    assert sorted(mc.touched_files(t)) == sorted(
+        ["/repo/real.py", "/repo/docs/scratchpad/adr.md"]
+    )
 
 
 # ---------------------------------------------------------------------------
