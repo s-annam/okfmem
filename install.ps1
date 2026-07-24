@@ -316,15 +316,36 @@ Set-StatuslineBadge
 Write-Host ""
 Write-Host "okfmem installation complete!"
 Write-Host ""
-Write-Host "Next steps:"
 
+# The one step the installer CANNOT do for you: init resolves the project to
+# wire from the process cwd (git rev-parse), so this run only wired the engine
+# clone. Every other repo needs its own `okfmem init`. Make that impossible to
+# scroll past -- a missed init is a silently memory-less repo, and the failure
+# is invisible (the agent just never remembers anything).
+$EngineName = Split-Path -Leaf $EngineDir
+Write-Host "======================================================================" -ForegroundColor Yellow
+Write-Host "  ONE MORE STEP -- REQUIRED IN EVERY REPO YOU WANT MEMORY FOR" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "      cd C:\path\to\your-repo"
+Write-Host "      okfmem init"
+Write-Host ""
+Write-Host "  This install wired only the repo it ran in ($EngineName)."
+Write-Host "  The memory link is PER-REPO -- repeat those two lines once in each"
+Write-Host "  project. Skip it and your agent silently remembers nothing there."
+Write-Host "======================================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Other next steps:"
+
+$Step = 1
 $PathDirs = $env:Path -split ";"
 if ($PathDirs -notcontains $BinDir) {
-    Write-Host "1. Add $BinDir to your User PATH, e.g.:"
+    Write-Host "$Step. Add $BinDir to your User PATH, e.g.:"
     Write-Host "     [Environment]::SetEnvironmentVariable('Path', `"`$env:Path;$BinDir`", 'User')"
     Write-Host "   (open a new terminal afterward for PATH changes to take effect)"
+    $Step++
 }
-Write-Host "2. Check system status by running: okfmem status"
-Write-Host "3. The consolidation Stop hook was wired into Claude Code automatically"
+Write-Host "$Step. Check system status by running: okfmem status"
+$Step++
+Write-Host "$Step. The consolidation Stop hook was wired into Claude Code automatically"
 Write-Host "   (see the 'stop hook' line above -- nothing to paste). For OTHER"
 Write-Host "   agents, the hook snippet is in README.md."

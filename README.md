@@ -39,6 +39,39 @@ The installer will:
 
 Make sure `~/.local/bin` is in your `$PATH`. (e.g., `export PATH="$HOME/.local/bin:$PATH"`).
 
+### Per-repo setup (`okfmem init`)
+
+`install.sh` is a **once-per-machine** step. The per-project memory link, though, is
+resolved from the **current repo** (the cwd's git root), so the installer only wires
+the repo you ran it in — the engine clone. In **every other repo** you want memory
+for, run `init` once from inside it:
+
+```bash
+cd ~/my-project
+okfmem init
+```
+
+That creates the `<harness-projects>/<encoded-repo-root>/memory -> ~/okfmem-store/projects/<name>`
+link, so your agent's `STATE.md` / `MEMORY.md` auto-load resolves to the store instead of an
+empty directory. A repo you've never saved memory for has no store project dir yet — `init`
+seeds one (with a starter `MEMORY.md` + `STATE.md`) and links it, so a brand-new repo is fully
+wired in that single command. It's idempotent — safe to re-run, and worth re-running after an
+engine update to repair skill links and pointers.
+
+Forgetting this step fails *silently* (the agent simply never remembers anything), so three
+surfaces nag you about it:
+
+*   **The installers** end with an unmissable "ONE MORE STEP — required in every repo" block.
+*   **The SessionStart hook** prints a one-line reminder when the session's repo is unlinked —
+    even under `--quiet`, since that's the exact case worth interrupting for.
+*   **`/okfmem` and `/okfmem-save`** probe the repo first and lead with the fix if it's unwired.
+
+All three share one read-only probe, which you can also run yourself:
+
+```bash
+okfmem init --project-link-state   # -> linked <name> | unlinked <name> | not-a-repo | no-claude
+```
+
 ### Uninstalling
 
 ```bash
@@ -194,7 +227,7 @@ okfmem init --wire-statusline
 It sets your Claude Code `statusLine` to the badge **only when you have none** — an existing/custom statusline is never clobbered; instead it prints a guarded compose snippet to paste in (mirrors how a caveman-style badge is delegated). The badge scripts (`okfmem-statusline.sh`, and `okfmem-statusline.ps1` for PowerShell) are keystroke-cheap (one small file read, no `git`/`python`) and refuse a symlinked flag. The hook also drops a git-ignored `.session-trail.md` in the store (cwd + files touched) so a *forgotten* save still leaves a same-machine trail. Opt the whole thing out with `OKFMEM_NO_STATUS=1`.
 
 ### 2. Initialization & Wiring (`okfmem init`)
-Scans your system for supported harnesses (Claude Code, Antigravity) and writes a managed `<!-- MEMORY-POINTER v1 -->` block into their global prompts so the AI knows where to find the memory. (The `install.sh` script runs this automatically).
+Scans your system for supported harnesses (Claude Code, Antigravity) and writes a managed `<!-- MEMORY-POINTER v1 -->` block into their global prompts so the AI knows where to find the memory. (The `install.sh` script runs this automatically — but only for the repo it runs in, so **run `okfmem init` once inside each new repo** you want project memory for; see [Per-repo setup](#per-repo-setup-okfmem-init).)
 
 ### 3. Backfill Metadata (`okfmem backfill`)
 An idempotent tool that stamps required YAML frontmatter (like `importance`, `pinned`, `created`) onto all durable pages. (The `install.sh` script runs this automatically).

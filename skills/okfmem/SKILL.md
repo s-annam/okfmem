@@ -55,6 +55,19 @@ Relay its output: detected harnesses + pointer state, registry roots/overrides,
 stale-reference count, and the skills-wiring line (`claude_code:N, codex:N,
 antigravity:N` — with "not linked — run `okfmem init`" if any are pending).
 
+Then probe **this repo's** own memory link — the per-repo wiring is separate
+from the machine-wide install, and an unlinked repo fails invisibly:
+
+```bash
+python3 ~/okfmem/okfmem init --project-link-state   # read-only
+```
+
+`linked <name>` is healthy. On **`unlinked <name>`, lead the summary with it**:
+this repo isn't wired, nothing said here will be remembered, and the fix is one
+command run from the repo root — `okfmem init` (it seeds the store project dir
+too, so a never-saved repo wires up in that single step). `not-a-repo` /
+`no-claude` are informational, not problems.
+
 ### Step 2: Store inventory
 
 ```bash
@@ -142,7 +155,9 @@ Print this orientation instead of the dashboard:
 - `/okfmem-curate` (`/memory-curate`) — **rare**; judgment-driven purge/merge
   the automatic decay pass won't do. Routine hygiene is already automatic.
 - `okfmem sync -m "…"` — commit+push the store by hand (pull-rebase + lock).
-- `okfmem init` — (re)wire skills + pointers into each harness after a clone.
+- `okfmem init` — run once **in each repo** you want memory for (the link is
+  per-repo; the installer only wired the repo it ran in). Also (re)wires skills
+  + pointers into each harness after a clone.
 - `okfmem consolidate --dry-run` — preview what decay would archive.
 
 **What's automatic vs manual**

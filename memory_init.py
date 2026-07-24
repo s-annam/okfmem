@@ -1120,6 +1120,89 @@ def _adopt_and_link_orphan(
     return ("changed", ", ".join(bits) + f" -> {name}, then linked{tier_note}")
 
 
+def _seed_store_project(target, name):
+    """Create an empty store project dir with the two files every harness
+    auto-loads (`MEMORY.md` index + `STATE.md` snapshot), so a repo that has
+    never been saved still links to something real. Idempotent: an existing
+    file is never overwritten."""
+    os.makedirs(target, exist_ok=True)
+    memory_md = os.path.join(target, "MEMORY.md")
+    if not os.path.exists(memory_md):
+        with open(memory_md, "w", encoding="utf-8") as f:
+            f.write(
+                f"# MEMORY — {name}\n\n"
+                "<!-- One line per durable page: - [Title](slug.md) — hook -->\n"
+            )
+    state_md = os.path.join(target, "STATE.md")
+    if not os.path.exists(state_md):
+        with open(state_md, "w", encoding="utf-8") as f:
+            f.write(
+                "---\n"
+                f"name: {name}-state\n"
+                f"description: Active-state snapshot for {name}\n"
+                "type: state\n"
+                "---\n\n"
+                f"# STATE — {name}\n\n"
+                "No session saved yet. Run `/okfmem-save` at the end of a "
+                "session to populate this.\n"
+            )
+
+
+def project_link_state(store, claude_projects=None):
+    """Read-only probe: is the CURRENT repo (cwd's git root) wired to the
+    store? Mutates nothing and never raises -- every reminder surface (the
+    SessionStart pull hook, the skills, `okfmem status`) shares this one
+    implementation instead of re-deriving the encoded path by hand (a
+    `sed 's|/|-|g'` re-derivation is wrong on Windows, where `encode_root`
+    also encodes the drive colon).
+
+    Returns (state, name) where state is one word:
+      'linked'      — memory link resolves to this repo's store project
+      'unlinked'    — in a git repo with Claude Code present, but not linked;
+                      `okfmem init` (run from the repo) is the fix
+      'not-a-repo'  — cwd isn't inside a git repo; nothing to link
+      'no-claude'   — no Claude Code harness detected
+    `name` is the resolved project name, or None when it can't be resolved.
+    """
+    try:
+        if claude_projects is None:
+            claude_projects = os.path.join(
+                os.path.expanduser("~"), ".claude", "projects"
+            )
+        if not detect_harnesses().get("claude_code"):
+            return ("no-claude", None)
+        root = _current_git_root()
+        if not root:
+            return ("not-a-repo", None)
+        reg = _load_registry(os.path.join(store, "registry.json"))
+        name = reg.get("overrides", {}).get(root, os.path.basename(root))
+        link = os.path.join(claude_projects, encode_root(root), "memory")
+        target_real = os.path.realpath(os.path.join(store, "projects", name))
+        if os.path.islink(link) or _is_junction(link):
+            if os.path.normcase(os.path.realpath(link)) == os.path.normcase(
+                target_real
+            ):
+                return ("linked", name)
+            return ("unlinked", name)
+        managed_copy = _managed_copy_target(link)
+        if managed_copy is not None and os.path.normcase(
+            os.path.realpath(managed_copy)
+        ) == os.path.normcase(target_real):
+            return ("linked", name)
+        return ("unlinked", name)
+    except OSError:
+        # Fail open: a probe that can't read the filesystem must never break
+        # the caller (a SessionStart hook, a skill's status line).
+        return ("no-claude", None)
+
+
+def cmd_project_link_state(store):
+    """`okfmem init --project-link-state`: print '<state> <name>' and exit.
+    Read-only (rung-1) -- never prompts, never writes."""
+    state, name = project_link_state(store)
+    print(state if name is None else f"{state} {name}")
+
+
 def link_project_memory(
     store,
     claude_projects,
@@ -1170,8 +1253,18 @@ def link_project_memory(
         return ("skip", "not inside a git repo")
     name = reg.get("overrides", {}).get(root, os.path.basename(root))
     target = os.path.join(store, "projects", name)
+    seeded = False
     if not os.path.isdir(target):
-        return ("skip", f"no store project dir for '{name}' yet")
+        # A repo you've never saved memory for has no store project dir yet.
+        # Returning "skip" here made the documented per-repo step (`cd <repo>
+        # && okfmem init`) a silent no-op -- exactly the case the step exists
+        # for. Seed the dir instead, then link it. Rung-1: additive, inside
+        # the user's OWN store, and only for the repo they explicitly ran
+        # `init` in.
+        if dry_run:
+            return ("changed", f"would seed store project '{name}' and link it")
+        _seed_store_project(target, name)
+        seeded = True
     target_real = os.path.realpath(target)
     proj_dir = os.path.join(claude_projects, encode_root(root))
     link = os.path.join(proj_dir, "memory")
@@ -1244,7 +1337,8 @@ def link_project_memory(
     elif os.path.isdir(link):
         os.rmdir(link)  # confirmed empty above
     tier_note = _install_memory_link(proj_dir, link, target_real)
-    return ("changed", f"{verb}ed to {name}{tier_note}")
+    seed_note = " (store project seeded)" if seeded else ""
+    return ("changed", f"{verb}ed to {name}{tier_note}{seed_note}")
 
 
 def _write_settings_json(claude_dir, settings, data):
@@ -2240,10 +2334,26 @@ def main():
         "the installers to ask the right question before wiring.",
     )
     ap.add_argument(
+        "--project-link-state",
+        action="store_true",
+        help="print a one-word probe of whether the CURRENT repo is wired to "
+        "the store (linked|unlinked|not-a-repo|no-claude) plus the resolved "
+        "project name, and exit -- read-only, used by the hook and skills to "
+        "remind you to run `okfmem init` in a new repo.",
+    )
+    ap.add_argument(
         "--store",
         default=os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store")),
     )
     args = ap.parse_args()
+
+    if args.project_link_state:
+        # Pure read; deliberately BEFORE the store-shape check so an
+        # unconfigured box still answers instead of exiting 2.
+        cmd_project_link_state(
+            os.path.abspath(os.path.expanduser(args.store))
+        )
+        return
 
     if args.statusline_state:
         # Pure read; independent of a store (needs only ~/.claude).

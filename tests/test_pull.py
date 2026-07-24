@@ -208,3 +208,30 @@ def test_main_exit_one_only_on_conflict(monkeypatch):
                                    "conflict": True, "offline": False,
                                    "reason": "conflict"})
     assert code == 1
+
+
+# --------------------------------------------------------------------------
+# unlinked_repo_notice — the SessionStart reminder to run `okfmem init`
+# --------------------------------------------------------------------------
+
+def test_notice_fires_only_when_unlinked(monkeypatch):
+    import memory_init as mi
+
+    monkeypatch.setattr(mi, "project_link_state", lambda store: ("unlinked", "proj"))
+    msg = mp.unlinked_repo_notice("/any/store")
+    assert msg and "okfmem init" in msg and "proj" in msg
+
+    for state in ("linked", "not-a-repo", "no-claude"):
+        monkeypatch.setattr(mi, "project_link_state",
+                            lambda store, _s=state: (_s, "proj"))
+        assert mp.unlinked_repo_notice("/any/store") is None
+
+
+def test_notice_never_raises(monkeypatch):
+    # Fail-open: this runs on the SessionStart path, so a broken probe must
+    # degrade to "no reminder", never a traceback that fails the hook.
+    import memory_init as mi
+
+    monkeypatch.setattr(mi, "project_link_state",
+                        lambda store: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert mp.unlinked_repo_notice("/any/store") is None

@@ -69,10 +69,25 @@ fi
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 PROJECT_NAME="$(basename "$PROJECT_ROOT")"
-MEMORY_DIR="$HOME/.claude/projects/$(echo "$PROJECT_ROOT" | sed 's|:|-|g; s|/|-|g')/memory"
+
+# Ask the engine whether THIS repo is wired, instead of re-deriving the encoded
+# path by hand: `encode_root` also encodes the drive colon on Windows, so a
+# hand-rolled sed/replace resolves to the wrong directory there.
+LINK_STATE="$(okfmem init --project-link-state)"   # "linked <name>" | "unlinked <name>" | "not-a-repo" | "no-claude"
+
+# The probe resolves the project name through the registry (honouring renames),
+# so take the name from it rather than assuming basename == project.
+STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
+MEMORY_DIR="$STORE/projects/$(echo "$LINK_STATE" | awk '{print $2}')"
 ```
 
-If `$MEMORY_DIR` does not exist or is not a symlink into `~/okfmem-store/projects/`, the project isn't set up yet — tell the user and offer to scaffold (create `~/okfmem-store/projects/<name>/` with a `MEMORY.md` + `STATE.md`, then symlink it into `$MEMORY_DIR`).
+**If the probe says `unlinked`, stop and fix that first** — this repo has no memory link, so anything you write would land in a directory the agent never auto-loads. Tell the user plainly, then run:
+
+```bash
+okfmem init   # from the repo root; seeds ~/okfmem-store/projects/<name>/ and links it
+```
+
+`init` creates the store project dir (with a seed `MEMORY.md` + `STATE.md`) when it doesn't exist yet, so a repo that has never been saved wires up in that one command. `not-a-repo` means `cd` to the project root first; `no-claude` means the harness isn't installed and there's nothing to link.
 
 **Pull latest before writing anything (#26).** The SessionStart pull hook (#16) only fires at session *start* — if another machine pushed to `~/okfmem-store` *during* this session, the store is stale by the time `/okfmem-save` runs. Bring it current before writing `STATE.md`/pages so this session's capture builds on the latest shared history instead of racing it during the Step 7 sync:
 

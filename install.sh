@@ -258,12 +258,31 @@ offer_statusline_badge || true
 echo ""
 echo "✅ okfmem installation complete!"
 echo ""
-echo "Next steps:"
+# The one step the installer CANNOT do for you: init resolves the project to
+# wire from the process cwd (git rev-parse), so this run only wired the engine
+# clone. Every other repo needs its own `okfmem init`. Make that impossible to
+# scroll past -- a missed init is a silently memory-less repo, and the failure
+# is invisible (the agent just never remembers anything).
+echo "======================================================================"
+echo "  ONE MORE STEP -- REQUIRED IN EVERY REPO YOU WANT MEMORY FOR"
+echo ""
+echo "      cd /path/to/your-repo"
+echo "      okfmem init"
+echo ""
+echo "  This install wired only the repo it ran in ($(basename "$ENGINE_DIR"))."
+echo "  The memory link is PER-REPO -- repeat those two lines once in each"
+echo "  project. Skip it and your agent silently remembers nothing there."
+echo "======================================================================"
+echo ""
+echo "Other next steps:"
+n=1
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo "1. Add ~/.local/bin to your PATH in ~/.bashrc or ~/.zshrc:"
+    echo "$n. Add ~/.local/bin to your PATH in ~/.bashrc or ~/.zshrc:"
     echo "   export PATH=\"\$HOME/.local/bin:\$PATH\""
+    n=$((n + 1))
 fi
-echo "2. Check system status by running: okfmem status"
-echo "3. The consolidation Stop hook was wired into Claude Code automatically"
+echo "$n. Check system status by running: okfmem status"
+n=$((n + 1))
+echo "$n. The consolidation Stop hook was wired into Claude Code automatically"
 echo "   (see the 'stop hook' line above -- nothing to paste). For other"
 echo "   agents, the hook snippet is in README.md."

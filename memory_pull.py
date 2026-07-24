@@ -200,6 +200,36 @@ def pull_store(store, timeout=DEFAULT_TIMEOUT):
             ms._release_lock(store, lock)
 
 
+def unlinked_repo_notice(store):
+    """Return a one-shot reminder when the session's repo has no memory link
+    yet, else None.
+
+    This runs on the SessionStart path, which is the ONLY okfmem surface that
+    fires in a repo the user never ran `okfmem init` in -- and an unlinked repo
+    fails invisibly (the agent simply never remembers anything), so silence is
+    the wrong default. Deliberately printed even under `--quiet`: SessionStart
+    stdout reaches the agent as context, and this is the one line worth the
+    interruption. Never raises -- the fail-open contract covers this too.
+    """
+    try:
+        engine = os.path.dirname(os.path.realpath(__file__))
+        if engine not in sys.path:
+            sys.path.insert(0, engine)
+        import memory_init as mi
+
+        state, name = mi.project_link_state(store)
+        if state != "unlinked":
+            return None
+        return (
+            f"okfmem: this repo ('{name}') is NOT wired to the memory store, "
+            "so nothing said here will be remembered next session. Tell the "
+            "user to run `okfmem init` once from this repo -- then continue "
+            "with their request."
+        )
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Fetch + integrate remote changes into the okfmem store "
@@ -207,12 +237,18 @@ def main():
     ap.add_argument("--store", default=os.environ.get("OKFMEM_STORE",
                     os.path.expanduser("~/okfmem-store")))
     ap.add_argument("--quiet", action="store_true",
-                    help="suppress output (for hook/automation use)")
+                    help="suppress output (for hook/automation use) -- the "
+                         "unlinked-repo reminder still prints, since a silent "
+                         "unlinked repo is the failure it exists to catch")
     args = ap.parse_args()
 
     res = pull_store(args.store)
     if not args.quiet:
         print(f"okfmem pull: {res['reason']}")
+
+    notice = unlinked_repo_notice(args.store)
+    if notice:
+        print(notice)
 
     # Fail-open: non-zero ONLY on a rebase conflict a human must resolve.
     # Offline / no-upstream / already-up-to-date all exit 0 so an automated
