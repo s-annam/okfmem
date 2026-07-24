@@ -177,15 +177,32 @@ SAVE_SKILLS = ("okfmem-save", "primer")
 # pipeline segment, i.e. in command position, where the word is the program
 # being run rather than an argument being searched for.
 COMMIT_RE = re.compile(r"git(?:\s+-\S*(?:\s+[^\s-]\S*)?)*\s+commit\b")
-SAVE_BASH_RE = re.compile(r"okfmem\s+sync\b|okfmem-save\b")
+# The save reaches the shell in several shapes, and only the bare one used to
+# match: `okfmem` is an extensionless Python script, so the real invocation is
+# `python3 ~/okfmem/okfmem sync`, and Windows goes through the .ps1/.cmd
+# wrappers. Missing those made the badge sit amber over a session that saved
+# and pushed — systematic, not incidental, since it fired on every real save.
+# Command position is still required; the prefix is stripped, not the anchor.
+SAVE_BASH_RE = re.compile(
+    r"(?:\S*[/\\])?okfmem(?:\.(?:ps1|cmd))?\s+sync\b"
+    r"|(?:\S*[/\\])?okfmem-save\b"
+)
 # Quoted spans are data, not code — blanked BEFORE segmenting, because a
 # separator inside a quoted regex (`grep 'a\|b'`) would otherwise split there
 # and leave the quote's tail sitting in apparent command position.
 QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-# Split on shell separators, then strip leading `(`, env assignments and
-# wrappers so `cd x && FOO=1 git commit` still resolves to a commit.
+# Split on shell separators, then strip leading `(`, env assignments, wrappers
+# and an interpreter with its flags, so `cd x && FOO=1 git commit` resolves to
+# a commit and `pwsh -File ./okfmem.ps1 sync` resolves to a save. Stripping an
+# interpreter cannot manufacture a save: what follows it is still required to
+# be the program, so the words as plain arguments (`py build.py okfmem sync`)
+# do not match.
 SEGMENT_RE = re.compile(r"\|\||&&|[;\n|]")
-LEAD_RE = re.compile(r"^[\s(]*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:sudo|command|nohup)\s+)*")
+INTERPRETER = r"(?:python3?|py|pwsh|powershell|bash|sh|zsh)(?:\.exe)?"
+LEAD_RE = re.compile(
+    r"^[\s(]*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:sudo|command|nohup)\s+)*"
+    r"(?:(?:\S*[/\\])?" + INTERPRETER + r"\s+(?:-\S+\s+)*)?"
+)
 # The user invoking the skill — as a bare slash command or via Claude Code's
 # `<command-name>` envelope. Anchored so a mention mid-sentence never counts.
 SAVE_CMD_RE = re.compile(r"(?:^|<command-name>)\s*/(?:okfmem-save|primer)\b",
