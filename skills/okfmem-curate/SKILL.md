@@ -24,13 +24,15 @@ origin: user
 
 Curate the per-project auto-memory store under `~/.claude/projects/<project-slug>/memory/`. Detects stale, superseded, or duplicate-with-CLAUDE.md entries; proposes a deletion/compression plan; on approval, executes and rewrites `MEMORY.md` as tight one-line hooks per the user's auto-memory convention.
 
+**Page deletion and archival are store hygiene and recall precision — not a context optimization (#52).** Only `MEMORY.md` and `STATE.md` are auto-loaded at session start; every other page costs zero context regardless of how many exist. A curate pass that deletes or archives 100 pages and touches no pointer saves **0** tokens. The number that moves the needle is auto-loaded bytes — see Phase 2 and Phase 4.
+
 Applies the "deterministic collection + LLM judgment" principle: a script collects facts, then an LLM cross-reads each candidate and produces verdicts. **Hard rule:** no file is deleted and no index is rewritten until the user has explicitly approved the plan.
 
 ## When to use
 
 - The user says "clean up memory", "prune memory", "memory hygiene", "tighten MEMORY.md", "context is bloated", or similar.
 - Periodic curation (monthly, or after a project reaches a milestone where many "X landed" memories accumulate).
-- After noticing MEMORY.md exceeds ~200 lines (the auto-load truncation point) or its size has grown well beyond ~10KB.
+- **Not** the byte-ceiling trigger — when `okfmem status` or `okfmem reindex --report` flags `MEMORY.md` as over the auto-load byte ceiling (`memory_reindex.MEMORY_BUDGET_BYTES`, 8192 bytes), that is `/okfmem-reindex`'s trigger, not this skill's: the remedy is a lane split (a pointer move), not a deletion. Phase 2 below still surfaces the same numbers, because a curate pass benefits from knowing them too, but this skill does not execute the split.
 - **Audit-only check-in**: when the user wants the report without committing to deletions yet — invoke with `audit` argument.
 
 ## Modes
@@ -66,22 +68,78 @@ If the link points into a git-backed location, surface that to the user as the r
 
 ### Phase 2: Inventory (deterministic)
 
-Run the inventory script:
+**Auto-loaded bytes — the headline numbers.** Run the reindex engine first.
+Its `auto_loaded` table is the only thing that costs context at session start
+(`MEMORY.md` + `STATE.md` against their ceiling), and its per-section
+breakdown of `MEMORY.md` shows **which section holds the bytes** — a single
+dominant block is the finding that decides whether the remedy is "tighten a
+few hooks" or "split a lane"; total file size alone never shows it:
+
+```bash
+python3 ~/okfmem/okfmem reindex --report "$MEM_DIR"
+```
+
+**If the `MEMORY.md` row reads `OVER`, the restructure trigger has fired
+(#53) — but that trigger is `/okfmem-reindex`'s to act on, not this
+skill's.** The recommended remedy is a lane split, never "tighten hooks":
+moving a lane's pointers out of `MEMORY.md` into a new or existing
+`MEMORY-<lane>.md` index recovers far more bytes than shortening a handful
+of hooks, and once a pointer moves to a lane index it is never re-flattened
+back to the root. `/okfmem-reindex` clusters the split, proposes it for
+approval, and executes it — see that skill for the full process. Report
+the `OVER` finding here (it belongs in this skill's numbers too, since a
+curate pass often runs on the same store), but hand the split itself to
+`/okfmem-reindex` rather than doing it inline.
+
+Also count pointer lines over the per-line budget (#52 — `okfmem-save`
+enforces ≤150 chars at write time; this is the check that catches what
+slipped through):
+
+```bash
+python3 ~/okfmem/okfmem reindex --budget-check "$MEM_DIR"
+```
+
+It walks **every** index, not just the root — after a lane split (or once
+#53's write-time routing is in effect) most pointers live in lane indexes,
+so checking `MEMORY.md` alone would miss almost all of them — and it accepts
+**both** pointer syntaxes, so the bare `- slug.md — hook` form a lane index
+uses is counted too. It reports each over-budget line with its index file,
+line number, and character count, and it is **advisory**: always exit 0,
+never a gate (the budget rule itself is advisory — see `okfmem-save` Step 3).
+
+> Do not hand-roll this as a shell one-liner. The `awk` version this replaced
+> was wrong in both directions at once: a `/^- \[/` guard is blind to every
+> bare pointer (exactly the ones a lane index holds), and BSD `awk`'s
+> `length($0)` counts **bytes**, so the convention's em-dash over-reported
+> every line carrying one. Same fail-open-on-macOS class as the old `sed`
+> verifier below. The budget constant lives in one place —
+> `memory_reindex.POINTER_BUDGET_CHARS`.
+
+Lead the curation report (Phase 4) with these numbers: `MEMORY.md` /
+`STATE.md` bytes vs. ceiling, and pointer overage count.
+
+**Page-level detail — store hygiene, not context.** Run the inventory script
+for per-file age, link status, and heuristic flags:
 
 ```bash
 python3 ~/okfmem/skills/okfmem-curate/scripts/inventory.py "$MEM_DIR"
 ```
 
-The script emits a markdown report with three sections:
+Page count and on-disk total bytes are **not auto-loaded and cost zero
+context at session start** — demote them to context for the plan, not a
+finding. Deleting or archiving a page changes none of the headline numbers
+above unless it also removes or shortens a `MEMORY.md` pointer.
 
-1. **Summary**: file count, total bytes, MEMORY.md size + line count, ratio.
-2. **Per-file table**: name, size, age (days since mtime), frontmatter `type` if present, frontmatter `name`, MEMORY.md link status (linked / orphan / dangling).
+The inventory script emits a markdown report with three sections:
+
+1. **Summary**: page count, total bytes, MEMORY.md size + line count, per-index pointer counts.
+2. **Per-file table**: name, size, age (days since mtime), frontmatter `type` if present, frontmatter `name`, link status (linked / orphan). Link status is computed across **every** `MEMORY*.md` in both pointer syntaxes — a page carried by a lane index is linked, not an orphan.
 3. **Heuristic flags**: per file, comma-separated flags drawn from filename + content patterns:
-   - `ck_snapshot` — filename matches `ck_YYYY-MM-DD_*.md` (CK session-end saves; ephemeral by nature)
+   - `ck_snapshot` — filename starts `ck_` (retired CK session-end saves; ephemeral by nature). These are *never* counted as orphans — they were never indexed by design, and every engine pass (`consolidate`, `backfill`, `reindex --verify`) skips them for the same reason. This skill is the one pass that still surfaces them, so a plan can propose deleting them.
    - `landed_doc` — filename or frontmatter `name` contains `landed` / `_operational` (project-state, prone to age out)
    - `superseded_marker` — body contains `SUPERSEDED`, `superseded by`, `replaced by`, or `(Note:` markers indicating self-deprecation
-   - `orphan` — exists but not linked from MEMORY.md
-   - `dangling` — linked from MEMORY.md but file missing
+   - `orphan` — a durable page that exists but is linked from no index (`MEMORY.md` *or* any `MEMORY-*.md` lane index); `ck_*.md` snapshots are excluded
+   - `dangling` — linked from an index but file missing (reported with the index it came from)
    - `old_45d` — mtime older than 45 days
    - `old_90d` — mtime older than 90 days
 
@@ -141,7 +199,7 @@ Recommended action per file: **graduate** a still-valuable page (promote into `C
 |---|---|
 | ... | ... |
 
-**Net effect:** -N files, MEMORY.md tightens from XKB to ~YKB, ~Z fewer tokens auto-loaded per session.
+**Net effect:** ~Z fewer tokens auto-loaded per session (MEMORY.md XKB → ~YKB; STATE.md unchanged unless also rewritten) — reads **0** if no auto-loaded file changes size. -N files archived/deleted is a store-hygiene count, reported separately; it is not a context saving by itself.
 
 → Approve as-is, or call out files to keep, before I touch anything.
 ```
@@ -165,18 +223,31 @@ Once approved:
 6. Run the verification block:
 
 ```bash
-cd "$MEM_DIR"
-echo "=== file count ==="; ls *.md | wc -l
-echo "=== MEMORY.md size + lines ==="; wc -c -l MEMORY.md
-echo "=== link integrity ==="
-grep -oE '\]\([A-Za-z][A-Za-z0-9_-]*\.md\)' MEMORY.md | sed 's/[)(]//g; s/^]//' | while read f; do
-  [ -f "$f" ] || echo "MISSING: $f"
-done
-echo "=== orphans (existing files not linked from MEMORY.md) ==="
-comm -23 <(ls *.md | sort) <({ echo MEMORY.md; grep -oE '\]\([A-Za-z][A-Za-z0-9_-]*\.md\)' MEMORY.md | sed 's/[)(]//g; s/^]//'; } | sort)
+python3 ~/okfmem/okfmem reindex --verify "$MEM_DIR"; echo "verify exit: $?"
+python3 ~/okfmem/okfmem reindex --report "$MEM_DIR"    # after-numbers for step 8
 ```
 
-If any `MISSING:` lines appear, the new MEMORY.md is broken — fix immediately. If orphans appear, decide per file: add the link back, or delete the orphan (with user confirmation).
+`--verify` walks **every** `MEMORY*.md` (not just the root index) and accepts
+**both** pointer syntaxes — `[title](slug.md)` and the bare `- slug.md — hook`
+a lane index uses. It exits **0** when the index is intact and **1** on any
+dangling pointer or orphan, so this line is a real gate: a non-zero exit means
+the rewrite broke the index — fix it before reporting success. Each dangling
+pointer is named **with the index file it came from**, which is what makes it
+fixable.
+
+> This used to be a `grep | sed | comm` pipeline, and it was wrong in the
+> unsafe direction: it read only `MEMORY.md`, only the rich link form, and its
+> BRE `\?` is a GNU extension that BSD `sed` (macOS) does not support — so on
+> the primary platform it silently failed to strip the prefix and reported
+> nothing. A verifier that fails open is worse than no verifier. The logic
+> lives in Python now (issue #54) precisely so it cannot diverge per platform.
+> If you ever hand-roll this again: anchor on the **link target**, never a
+> loose `- \[\?` prefix, or a pointer whose *title* starts with a filename
+> (`- [CLAUDE.md subdir lanes](real-slug.md)`) reports a phantom `CLAUDE.md`.
+
+If any dangling pointers appear, the new MEMORY.md is broken — fix immediately.
+If orphans appear, decide per file: add the link back, or delete the orphan
+(with user confirmation).
 
 7. Verify each **graduate** with the same rigor as delete/compress — confirm the rule actually landed and the source actually moved:
 
@@ -194,7 +265,7 @@ done
 
 A `MISSING:`/`BROKEN:` line here means the graduate did not apply (commonly: `--yes` was omitted so the non-interactive `[y/N]` silently skipped) — re-run `okfmem graduate <slug> --yes` and re-verify before rewriting MEMORY.md's counts.
 
-8. Report the final numbers: files before/after, MEMORY.md bytes before/after, estimated tokens saved per session (~bytes/3.5).
+8. Report the final numbers from the step-6 `okfmem reindex --report` run, in this order: (1) `MEMORY.md` + `STATE.md` bytes before/after against the ceiling and the resulting tokens saved per session (~bytes delta / 3.5) — the number that matters; (2) pages before/after, labelled non-context — store hygiene, not a context saving. "We deleted N files" must never be presented as a context saving on its own; say so only alongside a `MEMORY.md`/`STATE.md` byte drop.
 
 ## Recovery
 

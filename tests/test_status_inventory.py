@@ -4,6 +4,7 @@ import types
 import pytest
 
 import memory_init as mi
+from memory_reindex import page_files
 
 
 # ---------------------------------------------------------------------------
@@ -18,21 +19,28 @@ import memory_init as mi
 # ---------------------------------------------------------------------------
 
 def make_project(store, name, *, pages=0, archived=None, memory_lines=None,
-                 state=False, extra_files=()):
+                 memory_bytes=None, state=False, extra_files=()):
     """Create <store>/projects/<name>/ with the requested contents.
 
     ``archived`` = None -> no archive/ dir; an int -> archive/ dir with that
     many .md files. ``memory_lines`` = None -> no MEMORY.md; an int -> MEMORY.md
-    with exactly that many lines.
+    with exactly that many lines. ``memory_bytes`` (mutually exclusive with
+    ``memory_lines``) writes a MEMORY.md padded to exactly that many bytes —
+    used for the byte-ceiling tests, where the exact line count doesn't matter.
     """
     d = store / "projects" / name
     d.mkdir(parents=True)
     for i in range(pages):
         (d / f"page{i}.md").write_text(f"# page {i}\n", encoding="utf-8")
     if memory_lines is not None:
+        # newline="\n" pins the on-disk bytes to LF on every platform: without
+        # it Path.write_text translates to CRLF on Windows and any byte-count
+        # expectation computed from this same string is off by one per line.
         (d / "MEMORY.md").write_text("\n".join(f"line {i}"
                                      for i in range(memory_lines)) + "\n",
-                                     encoding="utf-8")
+                                     encoding="utf-8", newline="\n")
+    elif memory_bytes is not None:
+        (d / "MEMORY.md").write_bytes(b"x" * memory_bytes)
     if state:
         (d / "STATE.md").write_text("state\n", encoding="utf-8")
     if archived is not None:
@@ -64,12 +72,27 @@ def row_for(inv, name):
 
 def test_memory_and_state_excluded_from_pages(store):
     make_project(store, "proj", pages=3, memory_lines=10, state=True)
-    name, pages, archived, mem_lines, has_state, has_arch = row_for(
+    name, pages, archived, mem_bytes, has_state, has_arch = row_for(
         mi.project_inventory(str(store)), "proj")
     # 3 real pages; MEMORY.md and STATE.md are NOT pages.
     assert pages == 3
     assert has_state is True
-    assert mem_lines == 10
+    assert mem_bytes == len("\n".join(f"line {i}" for i in range(10)) + "\n")
+
+
+def test_lane_indexes_are_not_counted_as_pages(store):
+    """#53's lane routing creates MEMORY-<lane>.md index files. A root-only
+    "not MEMORY.md/STATE.md" filter counts every one of them as a durable page,
+    so the reported page total inflates by one per lane on exactly the stores
+    the lane-routing rule tells users to build. Pages come from the engine's
+    page_files(), which knows an index from a page."""
+    make_project(store, "proj", pages=2, memory_lines=3, state=True,
+                 extra_files=("MEMORY-parser.md", "MEMORY-tooling.md",
+                              "CONTEXT.md", "ck_2026-01-01_snap.md"))
+    _, pages, _, _, _, _ = row_for(mi.project_inventory(str(store)), "proj")
+    assert pages == 2
+    # The engine's own enumerator is the single source of truth for this rule.
+    assert pages == len(page_files(str(store / "projects" / "proj")))
 
 
 def test_archive_counted(store):
@@ -97,36 +120,60 @@ def test_empty_archive_dir_distinguishable_from_missing(store):
 
 
 # ---------------------------------------------------------------------------
-# MEMORY.md line count + the 200-line auto-load boundary
+# MEMORY.md byte count + the auto-load byte ceiling (#53 — supersedes the old
+# 200-line trigger: a store can sit well under 200 lines while over the byte
+# ceiling once pointers run long, since bytes and lines diverge whenever
+# pointer length isn't uniform).
 # ---------------------------------------------------------------------------
 
-def test_memory_line_count_exact(store):
-    make_project(store, "proj", memory_lines=137)
-    _, _, _, mem_lines, _, _ = row_for(
+def test_memory_byte_count_exact(store):
+    make_project(store, "proj", memory_bytes=500)
+    _, _, _, mem_bytes, _, _ = row_for(
         mi.project_inventory(str(store)), "proj")
-    assert mem_lines == 137
+    assert mem_bytes == 500
 
 
-def test_no_memory_file_is_zero_lines(store):
+def test_no_memory_file_is_zero_bytes(store):
     make_project(store, "proj", pages=1, memory_lines=None)
-    _, _, _, mem_lines, _, _ = row_for(
+    _, _, _, mem_bytes, _, _ = row_for(
         mi.project_inventory(str(store)), "proj")
-    assert mem_lines == 0
+    assert mem_bytes == 0
 
 
-def test_autoload_boundary_200_no_warn_201_warn(store):
-    make_project(store, "at_limit", memory_lines=200)
-    make_project(store, "over_limit", memory_lines=201)
+def test_byte_ceiling_shared_with_reindex_engine():
+    # The ceiling has exactly one home (memory_reindex.MEMORY_BUDGET_BYTES);
+    # memory_init imports it rather than restating the number (#53).
+    assert mi.MEMORY_BUDGET_BYTES == 8192
+
+
+def test_autoload_boundary_at_ceiling_no_warn_over_warns(store):
+    make_project(store, "at_limit", memory_bytes=mi.MEMORY_BUDGET_BYTES)
+    make_project(store, "over_limit", memory_bytes=mi.MEMORY_BUDGET_BYTES + 1)
     inv = mi.project_inventory(str(store))
     at = row_for(inv, "at_limit")[3]
     over = row_for(inv, "over_limit")[3]
-    assert at == 200
-    assert over == 201
-    # The warning fires on strictly-greater-than the constant: 200 is clean,
-    # 201 trips. This is the exact predicate cmd_status renders.
-    assert mi.MEMORY_AUTOLOAD_LINES == 200
-    assert (at > mi.MEMORY_AUTOLOAD_LINES) is False
-    assert (over > mi.MEMORY_AUTOLOAD_LINES) is True
+    assert at == mi.MEMORY_BUDGET_BYTES
+    assert over == mi.MEMORY_BUDGET_BYTES + 1
+    # The warning fires on strictly-greater-than the ceiling: at-budget is
+    # clean, one byte over trips. This is the exact predicate cmd_status
+    # renders.
+    assert (at > mi.MEMORY_BUDGET_BYTES) is False
+    assert (over > mi.MEMORY_BUDGET_BYTES) is True
+
+
+def test_lines_can_stay_low_while_bytes_trip_the_ceiling(store):
+    # The scenario #53 exists to fix: few lines, long pointers -> bytes blow
+    # the ceiling while the old line-count trigger would never fire.
+    long_pointer = "- [" + ("x" * 200) + "](slug.md) -- hook\n"
+    n_lines = 40
+    text = long_pointer * n_lines
+    (store / "projects" / "proj").mkdir(parents=True)
+    (store / "projects" / "proj" / "MEMORY.md").write_text(
+        text, encoding="utf-8")
+    _, _, _, mem_bytes, _, _ = row_for(
+        mi.project_inventory(str(store)), "proj")
+    assert n_lines < 200                       # old trigger: would not fire
+    assert mem_bytes > mi.MEMORY_BUDGET_BYTES   # byte trigger: fires
 
 
 # ---------------------------------------------------------------------------

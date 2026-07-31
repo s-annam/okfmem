@@ -7,3 +7,5 @@ COMMIT_EDITMSG
 .cache/
 # internal-only: marketing, launch drafts, positioning notes — not shipped OSS
 internal/
+# codegraph local index + daemon state — rebuildable, machine-local
+.codegraph/

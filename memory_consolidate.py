@@ -41,6 +41,10 @@ from datetime import datetime, timezone
 # Shared git commit+push path (pull-rebase + lock) lives beside this script.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from memory_sync import sync_store  # noqa: E402
+# Index enumeration: since #53's write-time lane routing, a page's pointer may
+# live in any `MEMORY*.md`, not just the root one. One shared enumerator so
+# this pass and `okfmem reindex --verify` can never disagree about the file set.
+from memory_reindex import index_files  # noqa: E402
 
 SKIP_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md"}
 DECAY_EXEMPT_TYPES = {"user", "feedback"}
@@ -773,12 +777,20 @@ def main():
         archive_page(c, today, args.dry_run)
         per_proj_slugs.setdefault(pdir, []).append(c["slug"])
 
+    # Drop the archived page's pointer from EVERY index that carries it, not
+    # just the root `MEMORY.md`. With #53's lane routing a new page's pointer
+    # is written straight into a lane index, so a root-only drop leaves a
+    # dangling pointer behind -- and this pass runs unattended from the Stop
+    # hook, so the damage accumulates silently until `--verify` starts failing
+    # with no user action. `drop_memory_lines`'s two patterns already handle
+    # both pointer syntaxes; only the file set was wrong.
     dropped_total = 0
     for pdir, slugs in per_proj_slugs.items():
-        dropped_total += drop_memory_lines(
-            os.path.join(pdir, "MEMORY.md"), slugs, args.dry_run)
+        for idx in index_files(pdir):
+            dropped_total += drop_memory_lines(
+                os.path.join(pdir, idx), slugs, args.dry_run)
     if to_archive:
-        print(f"MEMORY.md lines dropped: {dropped_total}")
+        print(f"index lines dropped: {dropped_total}")
 
     print(f"mode: {'DRY-RUN' if args.dry_run else 'APPLY'}")
 

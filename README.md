@@ -146,7 +146,7 @@ the inverse, so I built the smallest thing that does it.
 
 Storage uses [Google's Open Knowledge Format (OKF) v0.1][okf] — one markdown page per topic, YAML frontmatter, plain-markdown links. No database, no server.
 
-> A page read 3× survives ~3× longer; the always-loaded index stays ≤200 lines. Decay does the forgetting so the signal never gets buried mid-context.
+> A page read 3× survives ~3× longer; the always-loaded index stays under an 8KB byte budget. Decay does the forgetting so the signal never gets buried mid-context.
 
 ## Architecture: Engine ⇄ Store Split
 
@@ -178,7 +178,7 @@ Once installed, the memory system works transparently with your AI agent.
 ### 1. Auto-Loading Context (Start of Session)
 When the AI starts, it automatically reads two files per project:
 *   **`STATE.md` (Active State):** A bounded snapshot of current work, priorities, and context. Overwritten every session.
-*   **`MEMORY.md` (Durable Knowledge):** A 200-line index of one-line pointers to deeper knowledge.
+*   **`MEMORY.md` (Durable Knowledge):** An index of one-line pointers to deeper knowledge, kept under an ~8KB auto-load budget — a page's pointer routes to a topic-specific lane index by default, with `MEMORY.md` itself reserved for cross-cutting facts and a routing map to the lanes.
 
 ### 2. On-Demand Retrieval (During Session)
 If the AI needs more context, it `grep`s the durable `<slug>.md` pages referenced in `MEMORY.md`.
@@ -233,7 +233,7 @@ Scans your system for supported harnesses (Claude Code, Antigravity) and writes 
 An idempotent tool that stamps required YAML frontmatter (like `importance`, `pinned`, `created`) onto all durable pages. (The `install.sh` script runs this automatically).
 
 ### 4. Status Check (`okfmem status`)
-Run this anytime to view the wiring status, detected harnesses, and whether your store has any uncommitted changes. It also prints a per-project inventory — page and archive counts, `MEMORY.md` line count, and `STATE.md` presence — marking the project your current directory maps to (`*`) and flagging any project whose `MEMORY.md` has grown past the 200-line auto-load limit (a `/okfmem-curate` candidate), plus the decay epoch. The default view collapses to the current project and any over-limit project; add `--all` to list every project, or `--project <name>` for one.
+Run this anytime to view the wiring status, detected harnesses, and whether your store has any uncommitted changes. It also prints a per-project inventory — page and archive counts, `MEMORY.md` size in bytes, and `STATE.md` presence — marking the project your current directory maps to (`*`) and flagging any project whose `MEMORY.md` has grown past the 8KB auto-load byte ceiling (a `/okfmem-reindex` candidate, recommended remedy a lane split), plus the decay epoch. The default view collapses to the current project and any over-ceiling project; add `--all` to list every project, or `--project <name>` for one.
 
 ### 5. Session Search (`okfmem search`)
 An opt-in plugin that builds a local SQLite FTS5 index over your agent's past conversation transcripts (e.g., Claude Code or Antigravity logs). This allows your agent to perform deep full-text searches across historical sessions to recover details not currently in `MEMORY.md`. The `.db` is purely a derived local cache—gitignored and rebuildable anytime via `okfmem index`.
@@ -256,6 +256,24 @@ okfmem graduate my-slug             # [y/N] confirm, then apply
 ```
 
 It distills the source page's body into the target `CLAUDE.md` (default: the project-root file; `--to <dir>/CLAUDE.md` targets a lane-scoped file, seeded on first write), mirrors the same insertion into a sibling `AGENTS.md` **only when it's a real file** — a symlinked `AGENTS.md` (e.g. `AGENTS.md -> CLAUDE.md`) already resolves through, so it's left alone — and then **archives, never deletes**, the source page: moved to `projects/<proj>/archive/`, its `MEMORY.md` line dropped, and its frontmatter stamped with `graduated_to:` (target file + heading anchor + date/PR) so provenance survives and a later curate pass never re-flags or hard-deletes it. Writing outside the store is a rung-2 op, so it sits behind a `[y/N]` confirmation — skippable non-interactively, printing the exact manual command to run later.
+
+### 8. Reindex measurement (`okfmem reindex`)
+Once an index grows past one file, a few questions decide every restructuring — and none is answerable by looking at file sizes. Every mode is strictly read-only; none writes to the store.
+
+```bash
+okfmem reindex --report          # where the auto-loaded bytes actually sit
+okfmem reindex --verify          # did that move break anything?  exit 1 if so
+okfmem reindex --verify --json   # same, machine-readable
+okfmem reindex --budget-check    # pointer lines over the per-line char budget
+```
+
+**`--report`** leads with the only two files a harness auto-loads — `MEMORY.md` and `STATE.md` — measured against their byte ceiling, then breaks `MEMORY.md` down **per section**. That last number is the one that matters: a 18 KB index where a single flat block holds 83% of the bytes needs that *lane split out*, while the same 18 KB spread evenly needs its hooks tightened. Total file size can't tell those apart. Pages on disk are reported too and explicitly labelled non-context: several hundred pages and a few MB contribute exactly zero at session start, so page count is never by itself a reason to prune.
+
+**`--verify`** walks **every** `MEMORY*.md` and accepts **both** pointer syntaxes — `[title](slug.md)` and the bare `- slug.md — hook` a lane index uses — reporting each dangling pointer *named with the index file it came from*, plus any page in no index at all. It exits non-zero on either, so it can gate a reindex.
+
+**`--budget-check`** counts index lines over the per-line pointer budget (150 characters), across every index and in both syntaxes. **Characters, not bytes** — the pointer convention's em-dash is one character and three bytes, and a byte count over-reports every line that carries one. It is advisory and always exits 0; the byte ceiling `--report` measures is the number that gates anything.
+
+The parsing is anchored on the link **target**, at both ends of the line: a pointer whose *title* starts with a filename (`- [CLAUDE.md subdir lanes](real-slug.md)`) resolves to `real-slug.md`, and a filename named in the *hook* stays prose. Retired `ck_*.md` snapshots are skipped as orphan candidates, the same way `consolidate` and `backfill` skip them — they were never indexed by design, and counting them would make `--verify` fail on most real stores for a known-benign reason. This lives in Python rather than shell on purpose — the obvious `grep | sed` version of the same check uses a GNU-only BRE that BSD `sed` ignores, so on macOS it silently reported nothing, and the `awk` version of the budget count was blind to bare pointers *and* counting bytes. A checker that fails open is worse than no checker.
 
 ```mermaid
 flowchart TD

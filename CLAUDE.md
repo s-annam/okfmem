@@ -75,6 +75,8 @@ okfmem backfill  --dry-run    # stamp decay frontmatter on existing pages
 okfmem init      --dry-run    # per-repo memory link + pointers + registry wiring
 okfmem consolidate --dry-run  # decay + archive stale pages + push
 okfmem sync [-m "<msg>"]      # commit + pull-rebase + push the store (prompts for the message if -m omitted)
+okfmem reindex --report       # read-only: auto-loaded bytes vs ceiling + per-section breakdown
+okfmem reindex --verify       # read-only: link integrity across every MEMORY*.md; exits 1 on dangling/orphans
 
 python3 scripts/check-leaks.py   # leak gate (also runs first in CI)
 ruff check .                     # lint (advisory in CI today)
