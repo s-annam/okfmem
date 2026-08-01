@@ -73,13 +73,40 @@ PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 # Ask the engine whether THIS repo is wired, instead of re-deriving the encoded
 # path by hand: `encode_root` also encodes the drive colon on Windows, so a
 # hand-rolled sed/replace resolves to the wrong directory there.
-LINK_STATE="$(okfmem init --project-link-state)"   # "linked <name>" | "unlinked <name>" | "not-a-repo" | "no-claude"
+# Rung 1 — read-only, never prompts. Same engine-path hedge used for `okfmem
+# pull` below and `okfmem sync` in Step 7: bare `okfmem` when it's on PATH, else
+# the engine's own path (a manual install may leave `~/.local/bin` off `PATH`).
+LINK_STATE="$(okfmem init --project-link-state 2>/dev/null)" \
+  || LINK_STATE="$(python3 ~/okfmem/okfmem init --project-link-state 2>/dev/null)"
+#   "linked <name>" | "unlinked <name>" | "not-a-repo" | "no-claude" | "" (unreachable)
+
+# `read` consumes only the FIRST line and leaves NAME **empty** when the engine
+# printed a bare state: `not-a-repo`/`no-claude` carry no name at all. Do not
+# reach for `${LINK_STATE#* }` here — on a single-word value it hands back that
+# word unchanged, i.e. `not-a-repo` silently becomes the "project name".
+read -r STATE NAME <<< "$LINK_STATE"
 
 # The probe resolves the project name through the registry (honouring renames),
 # so take the name from it rather than assuming basename == project.
 STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
-MEMORY_DIR="$STORE/projects/$(echo "$LINK_STATE" | awk '{print $2}')"
+MEMORY_DIR=""                     # meaningful ONLY when STATE is `linked`
+if [ "$STATE" = "linked" ] && [ -n "$NAME" ]; then
+  MEMORY_DIR="$STORE/projects/$NAME"
+fi
 ```
+
+**`$MEMORY_DIR` stays empty for every state but `linked`, and that is
+load-bearing — this skill *writes*.** Building it unconditionally lets a missing
+name collapse to `$STORE/projects/`, the store's *projects root*: a real
+directory that passes any `-d` guard, so `STATE.md` and this session's memory
+pages would be written there, where nothing auto-loads them and they pollute the
+store next to the per-project dirs. **Never write anything with `$MEMORY_DIR`
+empty** — there is no safe default for it. If `$STATE` is empty or is none of the
+four states the probe can print, the engine could not be reached (`okfmem` off
+`PATH` *and* absent from `~/okfmem/okfmem`) or it wrote something unexpected to
+stdout: stop, report the raw `$LINK_STATE`, and have the user run
+`python3 ~/okfmem/okfmem init --project-link-state` directly to see the real
+error on stderr.
 
 **If the probe says `unlinked`, stop and fix that first** — this repo has no memory link, so anything you write would land in a directory the agent never auto-loads. Tell the user plainly, then run:
 
@@ -219,7 +246,7 @@ Fill each section from the session. **Stamp `modified:` with the current wall-cl
 **`STATE.md` has a ceiling: 8192 bytes** (~2.2k tokens) — the same auto-load budget `okfmem reindex` checks `MEMORY.md` against (`memory_reindex.STATE_BUDGET_BYTES`; #52). Generous headroom for a bounded, six-section, single-session snapshot, so this is a signal something drifted (a section grew a changelog instead of staying a pointer), not a routine concern. After writing, spot-check it:
 
 ```bash
-okfmem reindex --report "$MEMORY_DIR"   # or: python3 ~/okfmem/okfmem reindex --report "$MEMORY_DIR"
+okfmem reindex --report "${MEMORY_DIR:?Step 1 did not resolve a memory dir — do not fall back to a default}"   # or: python3 ~/okfmem/okfmem reindex --report "${MEMORY_DIR:?Step 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 Look at the `STATE.md` row's Status column. If it reads `OVER`, report it in Step 8 — advisory, not a rewrite gate.

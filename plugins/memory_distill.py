@@ -41,14 +41,49 @@ import os
 import re
 import sys
 
-# adapters + shared session lib live under plugins/; memory_init (decode_root)
-# lives at the repo root. Put both on the path, mirroring memory_search.py.
+# adapters + shared session lib live under plugins/; the engine modules
+# (memory_init's decode_root, memory_reindex's index/page enumeration) live at
+# the repo root. Put both on the path, mirroring memory_search.py.
 _PLUGINS_DIR = os.path.dirname(os.path.realpath(__file__))
 _ROOT_DIR = os.path.dirname(_PLUGINS_DIR)
 sys.path.insert(0, _PLUGINS_DIR)
-sys.path.insert(0, _ROOT_DIR)
+
+# One level up from plugins/ IS the engine root under both install shapes the
+# dispatcher produces (it resolves its own symlink before joining `plugins/`).
+# Probe anyway, and fall back to $OKFMEM_ENGINE / ~/okfmem, so a plugins/ dir
+# copied out of the repo prints one actionable line instead of a bare
+# ModuleNotFoundError traceback. Same probe shape as
+# skills/okfmem-curate/scripts/inventory.py, which hit this on #56.
+_ENGINE_MODULE = "memory_reindex.py"
+
+
+def _find_engine_root():
+    for cand in (_ROOT_DIR, os.environ.get("OKFMEM_ENGINE"),
+                 os.path.expanduser("~/okfmem")):
+        if cand and os.path.isfile(os.path.join(cand, _ENGINE_MODULE)):
+            return cand
+    return None
+
+
+_ENGINE_ROOT = _find_engine_root() or _ROOT_DIR
+if _ENGINE_ROOT not in sys.path:
+    sys.path.insert(0, _ENGINE_ROOT)
+
 from adapters import agy, claude_code  # noqa: E402
-from memory_init import decode_root  # noqa: E402  (reuse the FS-probing decoder)
+try:
+    from memory_init import decode_root  # noqa: E402  (FS-probing decoder)
+    # The single home for "which files are indexes, which are pages" and for
+    # pointer parsing (#54/#56). Restating either predicate here is the defect
+    # #57 exists to remove, so both are imported rather than reimplemented.
+    from memory_reindex import (index_files, page_files,  # noqa: E402
+                                parse_pointers, read_lines)
+except ImportError as exc:  # pragma: no cover - broken install shape only
+    sys.stderr.write(
+        "okfmem distill: okfmem engine not found (%s) — no %s beside plugins/, "
+        "in $OKFMEM_ENGINE, or in ~/okfmem. Run distill through the engine's "
+        "dispatcher instead: python3 ~/okfmem/okfmem distill\n"
+        % (exc, _ENGINE_MODULE))
+    sys.exit(2)
 
 DEFAULT_STORE = os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store"))
 
@@ -71,9 +106,6 @@ MAX_RATIO_MIN_SESS = 8   # below this many sessions, rely on the floor alone
 # both are noise for topic detection, so they're excluded by default. Genuine
 # decisions/topics live in what the user and the assistant SAY.
 DEFAULT_ROLES = frozenset({"user", "assistant"})
-
-# Pages/index files that are not durable knowledge pages.
-_SKIP_PAGE_NAMES = {"MEMORY.md", "STATE.md", "CONTEXT.md", "SESSIONS.md", "README.md"}
 
 # Token = a word-ish run bounded by alphanumerics, with tech-y inner chars kept
 # (node.js, memory_init.py, github.com), lowercased. Requiring alnum edges drops
@@ -157,7 +189,7 @@ def _emit_run(run):
 # ---------------------------------------------------------------------------
 def _page_token_set(store, proj, page_name, memory_hook=""):
     """Token set representing what an existing page already covers: its slug +
-    H1 title + its MEMORY.md hook line. Used to suppress already-covered topics."""
+    H1 title + its index hook line. Used to suppress already-covered topics."""
     tokens = set(_tokenize(page_name[:-3].replace("-", " ").replace("_", " ")))
     path = os.path.join(store, "projects", proj, page_name)
     try:
@@ -172,19 +204,37 @@ def _page_token_set(store, proj, page_name, memory_hook=""):
     return tokens
 
 
-def _memory_hooks(store, proj):
-    """Map slug.md -> its MEMORY.md hook text (the `- [Title](slug.md) — hook`
-    line), best-effort. Empty when no MEMORY.md."""
+def _memory_hooks(mem_dir):
+    """Map ``slug.md`` -> the index pointer line that names it, best-effort.
+
+    Walks **every** ``MEMORY*.md`` in the dir, not just the root index. Under
+    #53's lane routing most pointers live in a ``MEMORY-<lane>.md``, so reading
+    only the root handed every lane-pointed page an empty hook — a
+    systematically thinner token set than its root-pointed siblings, and the
+    asymmetry grows with every lane created (#57).
+
+    Parsing is `memory_reindex.parse_pointers`, the one pointer parser (#54),
+    so **both** syntaxes resolve: the rich ``- [Title](slug.md) — hook`` and
+    the bare ``- slug.md — hook`` a lane index actually uses. The local regex
+    this replaces saw only the rich form. `parse_pointers` returns a 1-based
+    line *number* rather than the line text, so the hook is read back out of
+    the same ``lines`` list it parsed.
+
+    External/cross-directory targets are dropped — they name nothing in this
+    dir. First index wins (`index_files` puts the root first), so a page
+    pointed at from two indexes still gets a deterministic hook. Empty when the
+    dir holds no index at all.
+    """
     hooks = {}
-    path = os.path.join(store, "projects", proj, "MEMORY.md")
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
-    except OSError:
-        return hooks
-    for ln in text.splitlines():
-        for m in re.finditer(r"[(/]([A-Za-z0-9._-]+)\.md\)", ln):
-            hooks[m.group(1) + ".md"] = ln
+    for name in index_files(mem_dir):
+        try:
+            lines, _costs = read_lines(os.path.join(mem_dir, name))
+        except OSError:
+            continue
+        for p in parse_pointers(lines):
+            if p.syntax == "external":
+                continue
+            hooks.setdefault(p.target, lines[p.line - 1])
     return hooks
 
 
@@ -192,7 +242,13 @@ def load_coverage(store, projects=None):
     """{store_project: [token_set_per_page]} for the given (or all) projects.
 
     A project with a dir but no pages yields []; a project absent from the store
-    yields no key at all (callers decide whether to still report it)."""
+    yields no key at all (callers decide whether to still report it).
+
+    Pages come from `memory_reindex.page_files`, so a lane index is never
+    tokenized as a page. That mattered: a lane index is a dense bag of every
+    hook in its lane, so feeding it here made almost any topic in that lane
+    look already-covered and silently suppressed genuine proposals (#57).
+    """
     proj_root = os.path.join(store, "projects")
     coverage = {}
     if not os.path.isdir(proj_root):
@@ -204,15 +260,9 @@ def load_coverage(store, projects=None):
         pdir = os.path.join(proj_root, proj)
         if not os.path.isdir(pdir):
             continue
-        hooks = _memory_hooks(store, proj)
-        page_sets = []
-        for fn in sorted(os.listdir(pdir)):
-            if not fn.endswith(".md") or fn in _SKIP_PAGE_NAMES:
-                continue
-            if fn.startswith("ck_"):
-                continue
-            page_sets.append(_page_token_set(store, proj, fn, hooks.get(fn, "")))
-        coverage[proj] = page_sets
+        hooks = _memory_hooks(pdir)
+        coverage[proj] = [_page_token_set(store, proj, fn, hooks.get(fn, ""))
+                          for fn in page_files(pdir)]
     return coverage
 
 
