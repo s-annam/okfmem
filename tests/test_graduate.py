@@ -426,3 +426,86 @@ def test_archive_remove_failure_leaves_no_split_brain(tmp_path, monkeypatch):
     assert memory_md.read_bytes() == memory_before
     assert not (repo / "CLAUDE.md").read_text(
         encoding="utf-8").count("does NOT egress")
+
+
+# ---------------------------------------------------------------------------
+# (N4) lane routing: the pointer may live in ANY index, so the drop — and the
+# rollback snapshot that has to be able to undo it — must cover every one.
+# Dropping only the root `MEMORY.md` strands a lane pointer (the same #53
+# composition bug consolidation had); snapshotting only the root while writing
+# several would turn a failed graduate into a half-modified store, which is
+# worse than the bug being fixed.
+# ---------------------------------------------------------------------------
+LANE_ROOT_MD = (
+    "# MEMORY\n\n"
+    "- MEMORY-lane.md — covers the lane\n"
+    "- [Other page](other.md) — unrelated hook\n"
+)
+LANE_MD = (
+    "# MEMORY-lane\n\n"
+    "- egress-claim.md — bare-syntax pointer in a lane index\n"
+)
+
+
+def _lane_store(tmp_path, root_md=LANE_ROOT_MD, lane_md=LANE_MD):
+    store = _store(tmp_path)
+    pdir = store / "projects" / "demoproj"
+    (pdir / "MEMORY.md").write_text(root_md, encoding="utf-8")
+    (pdir / "MEMORY-lane.md").write_text(lane_md, encoding="utf-8")
+    return store, pdir
+
+
+def test_pointer_living_in_a_lane_index_is_dropped(tmp_path, monkeypatch):
+    import datetime
+
+    store, pdir = _lane_store(tmp_path)
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(mg, "_current_git_root", lambda: str(repo))
+
+    plan = mg.build_plan(str(store), "egress-claim", "demoproj",
+                         str(repo / "CLAUDE.md"), None, None)
+    _dest, dropped = mg.apply_plan(plan, str(store), datetime.date(2026, 7, 23))
+
+    assert dropped == 1
+    assert "egress-claim.md" not in (pdir / "MEMORY-lane.md").read_text(
+        encoding="utf-8")
+    # the root routing row and unrelated pointer are not collateral damage
+    root = (pdir / "MEMORY.md").read_text(encoding="utf-8")
+    assert "MEMORY-lane.md" in root and "other.md" in root
+
+
+def test_rollback_restores_every_index_it_touched(tmp_path, monkeypatch):
+    """A failed graduate must leave EVERY index byte-identical, not just the
+    root one. The pointer is duplicated across both indexes here so both are
+    genuinely written before the outward step throws — a root-only snapshot
+    would restore `MEMORY.md` and leave the lane index permanently edited."""
+    import datetime
+
+    import pytest
+
+    store, pdir = _lane_store(
+        tmp_path,
+        root_md=LANE_ROOT_MD + "- [Egress](egress-claim.md) — root copy\n")
+    repo = _repo(tmp_path)
+    monkeypatch.setattr(mg, "_current_git_root", lambda: str(repo))
+
+    root_md, lane_md = pdir / "MEMORY.md", pdir / "MEMORY-lane.md"
+    root_before, lane_before = root_md.read_bytes(), lane_md.read_bytes()
+    src = pdir / "egress-claim.md"
+    src_before = src.read_bytes()
+
+    # Same failure injection as the CLAUDE.md-write test: a file where the
+    # target's parent dir should be, so os.makedirs throws AFTER both indexes
+    # have been rewritten.
+    blocker = repo / "blocker"
+    blocker.write_text("i am a file, not a dir\n", encoding="utf-8")
+    plan = mg.build_plan(str(store), "egress-claim", "demoproj",
+                         str(blocker / "CLAUDE.md"), None, None)
+
+    with pytest.raises(Exception):
+        mg.apply_plan(plan, str(store), datetime.date(2026, 7, 23))
+
+    assert root_md.read_bytes() == root_before
+    assert lane_md.read_bytes() == lane_before
+    assert src.exists() and src.read_bytes() == src_before
+    assert not (pdir / "archive" / "egress-claim.md").exists()

@@ -52,6 +52,7 @@ from memory_consolidate import (  # noqa: E402
     update_fields,
 )
 from memory_init import _current_git_root, _load_registry, _prompt_yes_no  # noqa: E402
+from memory_reindex import index_files  # noqa: E402
 
 DEFAULT_STORE = os.environ.get("OKFMEM_STORE", os.path.expanduser("~/okfmem-store"))
 
@@ -254,7 +255,7 @@ def render_plan(plan):
                         os.path.basename(plan["src"]))
     lines.append("")
     lines.append(f"archive:  {plan['src']}")
-    lines.append(f"      ->  {dest}  (MEMORY.md pointer dropped)")
+    lines.append(f"      ->  {dest}  (index pointer dropped)")
     return "\n".join(lines)
 
 
@@ -275,11 +276,18 @@ def apply_plan(plan, store, today):
     # split-brain (rule in both CLAUDE.md and the page, or source live beside a
     # duplicate archive copy) survives a throw.
     proj_dir = _project_dir_of(plan["src"])
-    memory_path = os.path.join(proj_dir, "MEMORY.md")
-    memory_before = None
-    if os.path.isfile(memory_path):
-        with open(memory_path, "r", encoding="utf-8", newline="") as f:
-            memory_before = f.read()
+    # EVERY index, not just the root one: since #53's lane routing a page's
+    # pointer may live in any `MEMORY*.md`, so a root-only drop would leave a
+    # dangling pointer behind. The rollback snapshot therefore has to cover the
+    # same set — snapshotting one file while writing several would turn a
+    # failed graduate into a half-modified store, which is worse than the bug
+    # being fixed.
+    index_paths = [os.path.join(proj_dir, n) for n in index_files(proj_dir)]
+    memory_before = {}
+    for p in index_paths:
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8", newline="") as f:
+                memory_before[p] = f.read()
 
     # The archive destination is deterministic (same path archive_page would
     # return), computed up front so the internal-phase rollback can clean up a
@@ -309,9 +317,11 @@ def apply_plan(plan, store, today):
         with open(dest, "w", encoding="utf-8", newline="") as f:
             f.write(dest_text)
 
-        dropped = drop_memory_lines(memory_path, [plan["slug"]], dry_run=False)
+        dropped = 0
+        for p in index_paths:
+            dropped += drop_memory_lines(p, [plan["slug"]], dry_run=False)
     except Exception:
-        _rollback_internal(plan, dest, memory_path, memory_before)
+        _rollback_internal(plan, dest, memory_before)
         raise
 
     # --- outward, non-atomic side (rolled back on failure) ---
@@ -325,19 +335,23 @@ def apply_plan(plan, store, today):
             with open(plan["agents_path"], "w", encoding="utf-8") as f:
                 f.write(plan["agents_after"])
     except Exception:
-        _rollback_apply(plan, dest, memory_path, memory_before, target_written)
+        _rollback_apply(plan, dest, memory_before, target_written)
         raise
 
     return dest, dropped
 
 
-def _rollback_internal(plan, dest, memory_path, memory_before):
+def _rollback_internal(plan, dest, memory_before):
     """Best-effort undo of the store-internal phase: drop the archived copy,
-    restore the live source page, and put MEMORY.md back. Remove the archive
-    copy FIRST, then restore the source — so a partial rollback can never leave
-    BOTH (the source-live-beside-a-duplicate-archive split-brain we most want to
-    avoid). Each undo step is guarded independently; a failure in one must not
-    skip the others or mask the original exception about to be re-raised."""
+    restore the live source page, and put **every** index we snapshotted back.
+    Remove the archive copy FIRST, then restore the source — so a partial
+    rollback can never leave BOTH (the source-live-beside-a-duplicate-archive
+    split-brain we most want to avoid). Each undo step is guarded
+    independently; a failure in one must not skip the others or mask the
+    original exception about to be re-raised — which is also why the index
+    restore loops with a per-file guard rather than one try around the loop.
+
+    `memory_before` maps index path -> its content before this run."""
     try:
         if os.path.isfile(dest):
             os.remove(dest)
@@ -348,23 +362,23 @@ def _rollback_internal(plan, dest, memory_path, memory_before):
             f.write(plan["src_text"])
     except Exception:
         pass
-    try:
-        if memory_before is not None:
-            with open(memory_path, "w", encoding="utf-8", newline="") as f:
-                f.write(memory_before)
-    except Exception:
-        pass
+    for path, text in (memory_before or {}).items():
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except Exception:
+            pass
 
 
-def _rollback_apply(plan, dest, memory_path, memory_before, target_written):
+def _rollback_apply(plan, dest, memory_before, target_written):
     """Best-effort undo of a partially-applied graduate: restore the live
-    source page, drop the archived copy, put MEMORY.md back, and revert any
+    source page, drop the archived copy, put every touched index back, and revert any
     outward CLAUDE.md/AGENTS.md write already made — so a failed apply leaves
     the world as if graduate never ran (no split-brain, no data loss). Each
     step is guarded independently; a rollback failure must not mask the
     original error that is about to be re-raised."""
     # Store-internal: un-archive the source.
-    _rollback_internal(plan, dest, memory_path, memory_before)
+    _rollback_internal(plan, dest, memory_before)
     # Outward: revert CLAUDE.md (and a mirrored AGENTS.md) if we managed to
     # write it before failing. The mirror only runs after CLAUDE.md succeeds,
     # so it's only in play once target_written is True.
@@ -423,7 +437,7 @@ def cmd_graduate(args):
     today = datetime.now(timezone.utc).date()
     dest, dropped = apply_plan(plan, store, today)
     print(f"\narchived: {dest}")
-    print(f"MEMORY.md lines dropped: {dropped}")
+    print(f"index lines dropped: {dropped}")
     return 0
 
 

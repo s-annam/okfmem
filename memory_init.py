@@ -44,6 +44,13 @@ import subprocess
 import sys
 import time
 
+# The auto-load byte ceiling is defined once, in memory_reindex (issue #54),
+# and reused here for the status trigger (issue #53) rather than restated as
+# a second number. memory_reindex only imports memory_init lazily inside a
+# function, so this top-level import does not create a cycle.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from memory_reindex import MEMORY_BUDGET_BYTES, page_files  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Output formatting — TTY-gated color + status glyphs, ASCII-safe when piped
 # ---------------------------------------------------------------------------
@@ -2256,10 +2263,11 @@ def update_nudge():
 # ---------------------------------------------------------------------------
 # Per-project inventory (content half of `okfmem status`)
 # ---------------------------------------------------------------------------
-# `MEMORY.md`'s first this-many lines auto-load into the agent; pointers past it
-# silently stop reaching the model, so a project over the cap is the one signal
-# `okfmem status` must surface (a `/okfmem-curate` candidate). Named, not a
-# literal, so the threshold has one home.
+# Historical line-count trigger (issue #40). Superseded by the byte-based
+# trigger below (issue #53): a store can sit well under this line count while
+# well over the byte ceiling once pointers run long, so `cmd_status` no longer
+# compares against it. Left defined -- not reused for a second threshold --
+# in case another caller still wants a line-count read.
 MEMORY_AUTOLOAD_LINES = 200
 
 
@@ -2267,15 +2275,23 @@ def project_inventory(store):
     """Per-project content inventory of the store.
 
     Returns a list of
-    ``(name, pages, archived, memory_lines, has_state, has_archive_dir)``
+    ``(name, pages, archived, memory_bytes, has_state, has_archive_dir)``
     tuples, one per directory under ``<store>/projects/``, sorted by name.
 
     Counting rules (must match the skill's intent):
-      * ``MEMORY.md`` and ``STATE.md`` are index/state files, NOT pages.
+      * Pages come from ``memory_reindex.page_files``: every index file
+        (``MEMORY.md`` and each ``MEMORY-<lane>.md``), ``STATE.md``,
+        ``CONTEXT.md`` and the retired ``ck_*.md`` snapshots are excluded.
+        Lane indexes are index files, not pages -- counting them inflates the
+        page total on exactly the stores #53's lane routing produces.
       * ``archived`` counts ``archive/*.md``; a MISSING ``archive/`` reports 0
         but stays distinguishable via ``has_archive_dir`` (the shell version
         conflated the two and errored on the unquoted glob).
-      * ``memory_lines`` is the ``MEMORY.md`` line count (0 when absent).
+      * ``memory_bytes`` is the ``MEMORY.md`` size on disk (0 when absent) --
+        the auto-load cost, and the byte-based restructure trigger (#53)
+        reads it against ``memory_reindex.MEMORY_BUDGET_BYTES``. A line count
+        undercounts a store where pointers run long, since bytes and lines
+        diverge whenever pointer length isn't uniform (#53).
 
     Pure stdlib, read-only. A missing ``projects/`` dir returns ``[]``.
     """
@@ -2287,27 +2303,22 @@ def project_inventory(store):
         d = os.path.join(root, name)
         if not os.path.isdir(d):
             continue
-        # glob.escape the directory so a project name containing a glob
-        # metacharacter can't corrupt the "*.md" match; the pattern tail stays
-        # literal on every platform (no shell = no unquoted-glob footgun).
-        pages = [
-            f
-            for f in glob.glob(os.path.join(glob.escape(d), "*.md"))
-            if os.path.basename(f) not in ("MEMORY.md", "STATE.md")
-        ]
+        # Page enumeration is the engine's, not a second local rule: with #53's
+        # lane routing a store holds MEMORY-<lane>.md index files, and a
+        # root-only "not MEMORY.md/STATE.md" filter counts every one of them as
+        # a durable page. page_files() applies the whole rule (indexes, state,
+        # ck_ snapshots) that every sibling pass already uses.
+        pages = page_files(d)
         adir = os.path.join(d, "archive")
         archived = glob.glob(os.path.join(glob.escape(adir), "*.md"))
         mem = os.path.join(d, "MEMORY.md")
-        lines = 0
-        if os.path.exists(mem):
-            with open(mem, "r", encoding="utf-8", errors="replace") as f:
-                lines = sum(1 for _ in f)
+        mem_bytes = os.path.getsize(mem) if os.path.exists(mem) else 0
         out.append(
             (
                 name,
                 len(pages),
                 len(archived),
-                lines,
+                mem_bytes,
                 os.path.exists(os.path.join(d, "STATE.md")),
                 os.path.isdir(adir),
             )
@@ -2391,24 +2402,30 @@ def cmd_status(store, show_all=False, project_filter=None):
         shown = inv
     else:
         # Default view: the cwd's project plus any project over the auto-load
-        # cap (the only rows that need acting on); collapse the rest.
+        # byte ceiling (the only rows that need acting on); collapse the rest.
+        # Bytes, not lines (#53) -- a store can sit well under the old
+        # 200-line mark while over budget once pointers run long, since a
+        # long pointer costs many bytes but still just one line.
         shown = [
             row
             for row in inv
-            if row[0] == cwd_project or row[3] > MEMORY_AUTOLOAD_LINES
+            if row[0] == cwd_project or row[3] > MEMORY_BUDGET_BYTES
         ]
-    for name, pages, archived, mem_lines, has_state, _has_arch in shown:
+    for name, pages, archived, mem_bytes, has_state, _has_arch in shown:
         marker = "*" if name == cwd_project else " "
         state = "yes" if has_state else "no"
         flag = ""
-        if mem_lines > MEMORY_AUTOLOAD_LINES:
+        if mem_bytes > MEMORY_BUDGET_BYTES:
+            # Remedy is a lane split, not tightening hooks: hook-tightening
+            # recovers a few hundred bytes, a lane split recovers thousands
+            # (issue #53). Once split, pointers are never re-flattened back.
             flag = (
-                f"   {glyph('warn')} over {MEMORY_AUTOLOAD_LINES}-line "
-                "auto-load limit"
+                f"   {glyph('warn')} over {MEMORY_BUDGET_BYTES}-byte "
+                "auto-load ceiling -- split a lane index (/okfmem-reindex)"
             )
         print(
             f"  {marker} {name:20} pages:{pages:<4} "
-            f"MEMORY.md:{mem_lines:<4} archived:{archived:<4} "
+            f"MEMORY.md:{mem_bytes:<6}B archived:{archived:<4} "
             f"STATE:{state}{flag}"
         )
     if project_filter is None and not show_all:

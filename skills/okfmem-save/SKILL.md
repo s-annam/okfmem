@@ -20,7 +20,7 @@ description: "Session close-out — clean up tool-created worktrees/branches, wr
 Everything lives under `~/.claude/projects/<proj-dir>/memory/` (symlinked to `~/okfmem-store/projects/<name>/`):
 
 - **Active state** lives in `STATE.md` — a bounded, single-session snapshot with a fixed 6-section shape (Summary / Left off / Next steps / Decisions / Blockers / Goal) plus OKF `type: state` frontmatter. It is **overwritten every session**, never appended. The native memory system auto-loads it next session.
-- **Durable knowledge** lives in per-topic `<topic>.md` pages (OKF v0.1: markdown + YAML frontmatter with a top-level `type:` field ∈ `user` | `feedback` | `project` | `reference`), indexed by one-line pointers in `MEMORY.md`. This is the durable write path: create or update the page, then add/refresh its `MEMORY.md` pointer.
+- **Durable knowledge** lives in per-topic `<topic>.md` pages (OKF v0.1: markdown + YAML frontmatter with a top-level `type:` field ∈ `user` | `feedback` | `project` | `reference`), indexed by one-line pointers in a `MEMORY*.md` index — the matching lane index by default, the root `MEMORY.md` only for cross-lane or `type: feedback` pages (#53; see Step 3). This is the durable write path: create or update the page, then add/refresh its pointer in that index.
 - `STATE.md` uses a separate `type: state` (see Step 5) — a different file with a different consumer (active-state snapshot, not the durable-page index), not a fifth value in the `type:` enum above.
 
 ## When to use
@@ -158,11 +158,23 @@ type: <user|feedback|project|reference>
 
 **Existing topic** (slug already a page in `$MEMORY_DIR`) → `Edit` that page to add the new fact, or supersede stale content in place (no manual `SUPERSEDED` markers needed — just rewrite the page to current truth).
 
-**Index pointer** — for every new page, add a one-line pointer to that project's `MEMORY.md`; for an updated page, refresh the existing pointer if its hook changed:
+**Index pointer** — for every new page, add a one-line pointer to the matching index (its target — a lane index by default, `MEMORY.md` only when the page qualifies as cross-lane — is decided by the lane-routing rule below, before the budget check); for an updated page, refresh the existing pointer in that same index if its hook changed:
 
 ```
 - [<Title>](<slug>.md) — <one-line hook>
 ```
+
+**Budget: the full pointer line is ≤150 chars, enforced here at write time (#52).** Capture runs every session; curate runs rarely — a budget only checked at curate time is a budget that is out of compliance almost always. Count the whole line (`- [<Title>](<slug>.md) — <hook>`) before writing it. Over 150, tighten the hook: move detail into the page body, where it costs nothing, and leave the index line as a bare recall hook. Apply the same check on a *refresh* — updating an existing topic's pointer must not silently re-inflate a line that was already in budget.
+
+This is advisory, not a hard gate: if a hook genuinely can't be tightened under 150 without losing the recall value, write it anyway and **report it** — see Step 8 — rather than let it pass silently.
+
+**Lane routing (#53) — decide this before writing the pointer above and before running the budget check.** The pointer's default target is the matching **lane index** (`MEMORY-<lane>.md`), not the root `MEMORY.md`: `MEMORY.md` is a map of content, not a page list, so a captured page routes to `MEMORY.md` only when it is genuinely cross-lane (project identity, deploy topology, a product invariant that cuts across every lane) or its frontmatter `type` is `feedback`. Everything else — most `user`/`project`/`reference` pages — belongs in a lane index.
+
+If no existing lane index covers this page's topic, **create one** rather than appending to `MEMORY.md`: `Write` `MEMORY-<lane>.md` using the same pointer-line format as the root index, then give the root `MEMORY.md` a one-line routing-table row for it — a short "covers" clause (e.g. `- MEMORY-<lane>.md — covers <what a session model can route on without opening it>`) so recall can route without opening the lane index. A lane is cheap to create; a flat root is not.
+
+With the target decided, apply the ≤150-char budget check above to the pointer as it will actually appear — in the lane index if it lands there, in `MEMORY.md` if it's cross-lane or `type: feedback`.
+
+**Once a pointer lives in a lane index, never move it back to the root.** Refreshing an existing page's pointer means editing it in the lane index it already lives in, not re-adding it to `MEMORY.md` — split pointers are never re-flattened (#53).
 
 Do this step before Step 5 so the `STATE.md` summary can mention what was captured.
 
@@ -203,6 +215,14 @@ modified: <ISO-8601 UTC timestamp — e.g. 2026-07-23T18:04:00Z>
 ```
 
 Fill each section from the session. **Stamp `modified:` with the current wall-clock time in ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`), fresh on every save** — `okfmem sync`/`okfmem pull` read this field to auto-resolve cross-machine `STATE.md` conflicts (newer `modified:` wins, last-write-wins), so a stale or missing value silently defers reconciliation to a hand-merge. Show a draft summary first: `"Session: '<summary>' — save this? (yes / edit)"`. After confirmation, `Write` the file (full overwrite — do not `Edit`/append; the whole file is replaced each session).
+
+**`STATE.md` has a ceiling: 8192 bytes** (~2.2k tokens) — the same auto-load budget `okfmem reindex` checks `MEMORY.md` against (`memory_reindex.STATE_BUDGET_BYTES`; #52). Generous headroom for a bounded, six-section, single-session snapshot, so this is a signal something drifted (a section grew a changelog instead of staying a pointer), not a routine concern. After writing, spot-check it:
+
+```bash
+okfmem reindex --report "$MEMORY_DIR"   # or: python3 ~/okfmem/okfmem reindex --report "$MEMORY_DIR"
+```
+
+Look at the `STATE.md` row's Status column. If it reads `OVER`, report it in Step 8 — advisory, not a rewrite gate.
 
 Keep `## Goal` as the project's standing goal — carry forward the prior value unless the goal shifted this session. Use `(none)` for empty `## Blockers`.
 
@@ -268,6 +288,7 @@ Show the user:
 - The worktree/branch cleanup result (Step 1c): removed N worktrees / M branches, and the kept list if non-empty
 - The session summary written to `STATE.md` (one line)
 - Any insights captured as memory pages (slugs + one-line hooks; note new vs. updated-existing)
+- Any `MEMORY.md` pointer over the 150-char budget after this session's writes (slug + length), or `"none"`; likewise if the `okfmem reindex --report` spot-check flagged `STATE.md` as `OVER`
 - Any issues filed or commented on (Linear or GitHub)
 - The memory push result — the commit SHA that was pushed (from `okfmem sync`'s status line), or `"no memory changes to push"` if the working tree was clean.
 
@@ -275,7 +296,10 @@ Show the user:
 
 - **Active state goes in `STATE.md`**, not in `MEMORY.md` or the memory pages
 - **`STATE.md` is bounded and overwritten every session** — full replace, never append; keep it to the 6-section template
-- **Durable knowledge is captured as `<topic>.md` memory pages + a `MEMORY.md` pointer**, not stored in `STATE.md`
+- **Durable knowledge is captured as `<topic>.md` memory pages + an index pointer**, not stored in `STATE.md`
+- **A new page's pointer routes to its lane index by default; `MEMORY.md` gets a pointer only for cross-lane or `type: feedback` pages (#53)** — create a lane index (with a routing "covers" row in `MEMORY.md`) when no lane matches; never re-flatten a lane pointer back to the root
+- **An index pointer is ≤150 chars, checked at write time (#52)** — new or refreshed, tighten before writing; if it can't be tightened without losing recall value, write it and report it in Step 8 rather than pass silently
+- **`STATE.md` has an 8192-byte ceiling** (`memory_reindex.STATE_BUDGET_BYTES`), spot-checked via `okfmem reindex --report` after Step 5's write; report `OVER`, don't gate on it
 - **Reuse an existing page slug to update a topic** (dedup) — rewrite the page to current truth instead of leaving stale duplicates
 - **Pending work goes in the issue tracker** (Linear or GitHub, whichever this project uses), not in `STATE.md` `## Blockers` (reserve blockers for "can't progress" not "haven't started")
 - **Capture memory pages BEFORE writing `STATE.md`** so the session summary can reference what was captured

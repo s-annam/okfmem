@@ -29,7 +29,7 @@ Two git-backed repos + native memory auto-load:
 Two memory layers, both plain markdown the native memory system auto-loads:
 
 - **Active state** — `projects/<name>/STATE.md`, bounded 6-section snapshot, **overwritten** each session by `/okfmem-save`.
-- **Durable knowledge** — `projects/<name>/<slug>.md` pages indexed by one-line pointers in `MEMORY.md` (first 200 lines auto-load); pages read on demand.
+- **Durable knowledge** — `projects/<name>/<slug>.md` pages indexed by one-line pointers in a `MEMORY*.md` index: the matching lane index by default, the root `MEMORY.md` only for cross-lane or `type: feedback` pages (#53); pages read on demand.
 
 Four moving parts:
 
@@ -39,6 +39,7 @@ Four moving parts:
 | **hygiene** (decay/archive/regen MEMORY.md) | Stop hook → `memory_consolidate.py` | deterministic; archives stale pages (reversible), never deletes |
 | **sync in** | SessionStart hook → `git pull --rebase` | freshens the store before the session |
 | **hard curation** | `/okfmem-curate` (rare, gated) | semantic merge / hard purge decay won't do |
+| **reindex** | `/okfmem-reindex` (byte ceiling trips, gated) | clusters flat pointers into lane indexes; moves, never deletes |
 
 `okfmem sync` (shared git helper) backs **both** `/okfmem-save` and the Stop-hook
 consolidation, so pull-rebase + concurrency-lock behavior is identical on both.
@@ -77,16 +78,21 @@ prints:
 
 ```
   projects (14):
-  * okfmem              pages:27   MEMORY.md:33   archived:0    STATE:yes
-    tools               pages:158  MEMORY.md:202  archived:0    STATE:yes   ! over 200-line auto-load limit
+  * okfmem              pages:27   MEMORY.md:4200  B archived:0    STATE:yes
+    tools               pages:158  MEMORY.md:15600 B archived:0    STATE:yes   ! over 8192-byte auto-load ceiling -- split a lane index (/okfmem-reindex)
     + 11 more (okfmem status --all)
   decay: epoch 2026-07-16
 ```
 
 - The `*` marks the project the current working directory maps to.
-- Any project whose `MEMORY.md` exceeds the 200-line auto-load limit is flagged
-  inline (`! over 200-line auto-load limit`) — a candidate for `/okfmem-curate`.
-- The default view collapses to the current project plus any over-limit
+- Any project whose `MEMORY.md` exceeds the auto-load byte ceiling
+  (`memory_reindex.MEMORY_BUDGET_BYTES`, 8192 bytes) is flagged inline
+  (`! over 8192-byte auto-load ceiling`) — a candidate for `/okfmem-reindex`,
+  not `/okfmem-curate`. Bytes, not line count, are the trigger (#53): a
+  store can sit well under the old 200-line mark while over the byte
+  ceiling once pointers run long. The recommended remedy is a lane split,
+  not tightening hooks.
+- The default view collapses to the current project plus any over-ceiling
   project. When the user wants the **full** list, re-run
   `python3 ~/okfmem/okfmem status --all`; for a single project,
   `python3 ~/okfmem/okfmem status --project <name>`.
@@ -112,9 +118,9 @@ Missing canonical skills or an unwired hook → tell the user to run `okfmem ini
 ### Summarize
 
 Close with a 3–5 line health summary: how many projects, anything over the
-`MEMORY.md` line cap (from the flagged rows), the store sync state, and any
-wiring gap with the one command that fixes it (`okfmem init` for skills/hooks,
-`okfmem sync` for a dirty store).
+`MEMORY.md` byte ceiling (from the flagged rows), the store sync state, and
+any wiring gap with the one command that fixes it (`okfmem init` for
+skills/hooks, `okfmem sync` for a dirty store).
 
 ## Usage (`/okfmem usage`)
 
@@ -136,6 +142,10 @@ Print this orientation instead of the dashboard:
 - `/okfmem-save` (`/primer`) — session close-out (capture + STATE + push).
 - `/okfmem-curate` (`/memory-curate`) — **rare**; judgment-driven purge/merge
   the automatic decay pass won't do. Routine hygiene is already automatic.
+- `/okfmem-reindex` — when `MEMORY.md` trips the byte ceiling: clusters the
+  flat pointers into lane indexes and rewrites `MEMORY.md` as a routing
+  table. Nothing is deleted — pointers only move. `audit` mode previews the
+  cluster proposal without writing.
 - `okfmem sync -m "…"` — commit+push the store by hand (pull-rebase + lock).
 - `okfmem init` — run once **in each repo** you want memory for (the link is
   per-repo; the installer only wired the repo it ran in). Also (re)wires skills
