@@ -48,23 +48,64 @@ Five phases. Phases 4 and 5 are gated on explicit user approval — never execut
 
 ### Phase 1: Resolve target directory
 
-Compute the memory dir from the current working directory:
+If the user passed an explicit path argument (e.g. `/okfmem-curate audit <path>`), use it as
+`MEM_DIR` directly and skip the probe below — this is the escape hatch for running outside a
+repo.
+
+Otherwise, ask the engine rather than re-deriving the encoded path by hand: `encode_root` also
+encodes the drive colon on Windows, so a hand-rolled `sed`/replace resolves to the wrong
+directory there, and it can't see registry overrides for a renamed project either.
 
 ```bash
-# project slug = absolute cwd with / replaced by -
-SLUG=$(pwd -P | sed 's|/|-|g')
-MEM_DIR="$HOME/.claude/projects/$SLUG/memory"
+# Rung 1 — read-only, never prompts. Try bare `okfmem` first, then fall back to
+# the engine's own path: a manual install that leaves `~/.local/bin` off `PATH`
+# is supported, and every later phase in this skill already calls the engine as
+# `python3 ~/okfmem/okfmem ...` for that reason.
+LINK_STATE="$(okfmem init --project-link-state 2>/dev/null)" \
+  || LINK_STATE="$(python3 ~/okfmem/okfmem init --project-link-state 2>/dev/null)"
+#   "linked <name>" | "unlinked <name>" | "not-a-repo" | "no-claude" | "" (unreachable)
+
+# `read` consumes only the FIRST line and leaves NAME **empty** when the engine
+# printed a bare state: `not-a-repo`/`no-claude` carry no name at all. Do not
+# reach for `${LINK_STATE#* }` here — on a single-word value it hands back that
+# word unchanged, i.e. `not-a-repo` silently becomes the "project name".
+read -r STATE NAME <<< "$LINK_STATE"
+
+STORE="${OKFMEM_STORE:-$HOME/okfmem-store}"
+MEM_DIR=""                        # meaningful ONLY for `linked` — see the table
+if [ "$STATE" = "linked" ] && [ -n "$NAME" ]; then
+  MEM_DIR="$STORE/projects/$NAME"
+fi
 ```
 
-If `$MEM_DIR` doesn't exist, tell the user and stop. If the user passed an explicit path argument, use it instead.
+Branch on `$STATE`:
 
-Detect whether the dir is symlinked into `~/okfmem-store` (so deletions are git-recoverable). Run:
+| State | What Phase 1 does |
+|---|---|
+| `linked <name>` | proceed with the resolved `$MEM_DIR` |
+| `unlinked <name>` | stop — tell the user this repo has no memory link; the fix is `okfmem init` from the repo root, then re-run `/okfmem-curate` |
+| `not-a-repo` | stop — tell the user to `cd` to the project root first (or pass an explicit path) |
+| `no-claude` | stop — tell the user the harness isn't installed here; nothing to curate |
+| anything else — `$STATE` empty, or a word not in the four rows above | stop — the engine could not be reached (`okfmem` is off `PATH` *and* absent from `~/okfmem/okfmem`), or it wrote something unexpected to stdout. Report the raw `$LINK_STATE` and have the user run `python3 ~/okfmem/okfmem init --project-link-state` directly to see the real error on stderr, or re-invoke `/okfmem-curate` with an explicit path argument |
+
+**`$MEM_DIR` stays empty in every row but the first, and that is the point.**
+Building it unconditionally is what made a missing name collapse to
+`$STORE/projects/` — the store's *projects root*, a real directory that passes
+any `-d` guard — so Phases 2–3 would report on the wrong tree and Phase 4 would
+ask the user to approve deletions derived from it. Never proceed past this phase
+with `$MEM_DIR` unset; there is no safe default for it.
+
+Detect whether the dir is git-backed (so deletions are recoverable). Run:
 
 ```bash
-readlink "$MEM_DIR" 2>/dev/null
+# Test the property, not a proxy for it. `$MEM_DIR` is now the symlink's TARGET
+# inside the store, not the `~/.claude/projects/<encoded>/memory` symlink — so
+# `readlink` prints nothing and exits 1 here, which would report "not
+# recoverable" on every correctly linked, fully git-backed store. Ask git.
+git -C "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}" rev-parse --show-toplevel 2>/dev/null
 ```
 
-If the link points into a git-backed location, surface that to the user as the recovery mechanism. If not, *say so explicitly* — recovery is harder.
+Non-empty output is the enclosing repo — surface it to the user as the recovery mechanism (it is the `<toplevel>` in the Recovery section's `git -C <toplevel> restore .`). Empty output means the dir is genuinely not under git: *say so explicitly* — recovery is harder. This also works for the explicit-path escape hatch, which `readlink` never handled.
 
 ### Phase 2: Inventory (deterministic)
 
@@ -76,7 +117,7 @@ dominant block is the finding that decides whether the remedy is "tighten a
 few hooks" or "split a lane"; total file size alone never shows it:
 
 ```bash
-python3 ~/okfmem/okfmem reindex --report "$MEM_DIR"
+python3 ~/okfmem/okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 **If the `MEMORY.md` row reads `OVER`, the restructure trigger has fired
@@ -96,7 +137,7 @@ enforces ≤150 chars at write time; this is the check that catches what
 slipped through):
 
 ```bash
-python3 ~/okfmem/okfmem reindex --budget-check "$MEM_DIR"
+python3 ~/okfmem/okfmem reindex --budget-check "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 It walks **every** index, not just the root — after a lane split (or once
@@ -122,7 +163,7 @@ Lead the curation report (Phase 4) with these numbers: `MEMORY.md` /
 for per-file age, link status, and heuristic flags:
 
 ```bash
-python3 ~/okfmem/skills/okfmem-curate/scripts/inventory.py "$MEM_DIR"
+python3 ~/okfmem/skills/okfmem-curate/scripts/inventory.py "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"
 ```
 
 Page count and on-disk total bytes are **not auto-loaded and cost zero
@@ -223,8 +264,8 @@ Once approved:
 6. Run the verification block:
 
 ```bash
-python3 ~/okfmem/okfmem reindex --verify "$MEM_DIR"; echo "verify exit: $?"
-python3 ~/okfmem/okfmem reindex --report "$MEM_DIR"    # after-numbers for step 8
+python3 ~/okfmem/okfmem reindex --verify "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"; echo "verify exit: $?"
+python3 ~/okfmem/okfmem reindex --report "${MEM_DIR:?Phase 1 did not resolve a memory dir — do not fall back to a default}"    # after-numbers for step 8
 ```
 
 `--verify` walks **every** `MEMORY*.md` (not just the root index) and accepts

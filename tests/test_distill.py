@@ -182,8 +182,11 @@ def test_deterministic_across_runs():
 # load_coverage
 # ---------------------------------------------------------------------------
 def _write(path, text):
+    # newline="\n" pinned: text mode would otherwise translate to CRLF on
+    # Windows, so a fixture written here would differ byte-for-byte between the
+    # two CI legs.
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
 
 
@@ -201,6 +204,97 @@ def test_load_coverage_reads_pages_and_skips_index_files(tmp_path):
     page = cov["demoproj"][0]
     assert {"leak", "gate"} <= page          # slug + H1
     assert "scanner" in page                  # from the MEMORY.md hook
+
+
+# ---------------------------------------------------------------------------
+# load_coverage across lane indexes (#57)
+# ---------------------------------------------------------------------------
+def _lane_store(tmp_path):
+    """A store project shaped the way #53's lane routing leaves one: a root
+    index that only ROUTES, two lane indexes carrying every real pointer (one
+    rich, one bare, one of each syntax), three durable pages, plus the two
+    kinds of file that are never pages (STATE.md, a retired ck_ snapshot).
+
+    Every path is composed with os.path.join, so the fixture is identical on
+    both CI legs; nothing here asserts a byte count.
+    """
+    store = str(tmp_path)
+    pdir = os.path.join(store, "projects", "demoproj")
+    _write(os.path.join(pdir, "MEMORY.md"),
+           "# MEMORY — demoproj\n\n"
+           "- MEMORY-parser.md — covers the parser lane\n"
+           "- MEMORY-tooling.md — covers the tooling lane\n")
+    _write(os.path.join(pdir, "MEMORY-parser.md"),
+           "# MEMORY — parser lane\n\n"
+           "- [Rich pointer page](rich-page.md) — quaternion hook wording\n"
+           "- bare-page.md — kaleidoscope hook wording\n")
+    _write(os.path.join(pdir, "MEMORY-tooling.md"),
+           "# MEMORY — tooling lane\n\n"
+           "- [Third page](third-page.md) — obelisk hook wording\n")
+    for slug, title in (("rich-page.md", "Rich pointer page"),
+                        ("bare-page.md", "Bare pointer page"),
+                        ("third-page.md", "Third page")):
+        _write(os.path.join(pdir, slug),
+               "---\ntype: project\n---\n\n# %s\n\nbody\n" % title)
+    _write(os.path.join(pdir, "STATE.md"), "# state\n")
+    _write(os.path.join(pdir, "ck_2026-01-02_snap.md"), "# retired snapshot\n")
+    return store, pdir
+
+
+def test_load_coverage_enumerates_pages_via_reindex_not_a_local_rule(tmp_path):
+    """A lane index is an index, not a durable page (#57).
+
+    Pre-change the local `_SKIP_PAGE_NAMES` filter knew only the ROOT index, so
+    this store yielded 5 page sets rather than 3 — MEMORY-parser.md and
+    MEMORY-tooling.md tokenized as if they were pages. That matters because a
+    lane index is a dense bag of every hook in its lane, so it makes almost any
+    topic in that lane read as already-covered.
+    """
+    from memory_reindex import page_files
+    store, pdir = _lane_store(tmp_path)
+    cov = md.load_coverage(store)
+    assert len(cov["demoproj"]) == len(page_files(pdir)) == 3
+    # A lane index's own token set carries both halves of its slug plus its H1.
+    assert not any({"memory", "parser"} <= ps for ps in cov["demoproj"])
+    assert not any({"memory", "tooling"} <= ps for ps in cov["demoproj"])
+    # Retired ck_ snapshots stay excluded (already true; must not regress).
+    assert not any({"retired", "snapshot"} <= ps for ps in cov["demoproj"])
+
+
+def test_load_coverage_hooks_come_from_lane_indexes_in_both_syntaxes(tmp_path):
+    """A page whose pointer lives ONLY in a lane index still gets its hook, in
+    either pointer syntax (#57).
+
+    Pre-change `_memory_hooks` read only the root index — which here holds no
+    page pointer at all — so all three of these pages got `""` and a
+    systematically thinner token set than a root-pointed sibling. The bare form
+    was doubly missed: the local regex matched only `](slug.md)`.
+    """
+    store, _pdir = _lane_store(tmp_path)
+    cov = md.load_coverage(store)
+    assert any("quaternion" in ps for ps in cov["demoproj"])    # lane, rich
+    assert any("kaleidoscope" in ps for ps in cov["demoproj"])  # lane, bare
+    assert any("obelisk" in ps for ps in cov["demoproj"])       # second lane
+
+
+def test_memory_hooks_maps_every_index_pointer_to_its_line(tmp_path):
+    """`_memory_hooks` keys off the pointer TARGET across every MEMORY*.md,
+    via the shared `memory_reindex.parse_pointers` (#54) rather than a second
+    local regex — so both syntaxes resolve and the hook is the whole line."""
+    _store, pdir = _lane_store(tmp_path)
+    hooks = md._memory_hooks(pdir)
+    assert "quaternion" in hooks["rich-page.md"]
+    assert "kaleidoscope" in hooks["bare-page.md"]
+    assert "obelisk" in hooks["third-page.md"]
+    # A routing row is a pointer too, so the lane indexes are keyed; they are
+    # simply never looked up, because page_files() never yields them.
+    assert "covers the parser lane" in hooks["MEMORY-parser.md"]
+
+
+def test_memory_hooks_empty_when_no_index(tmp_path):
+    pdir = os.path.join(str(tmp_path), "projects", "bare")
+    _write(os.path.join(pdir, "page.md"), "# page\n")
+    assert md._memory_hooks(pdir) == {}
 
 
 # ---------------------------------------------------------------------------
