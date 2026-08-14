@@ -1,7 +1,7 @@
 ---
 name: okfmem-save
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__claude_ai_Linear__get_issue, mcp__claude_ai_Linear__save_comment, mcp__claude_ai_Linear__list_comments, mcp__linear__get_issue, mcp__linear__save_comment, mcp__linear__list_comments
-description: "Session close-out — clean up tool-created worktrees/branches, write active state to STATE.md, capture durable insights as memory pages, and commit + push okfmem-store via `okfmem sync`. Drafts an impl-complete comment on the resolved issue (Linear via MCP, GitHub via `gh issue comment`). Invoked as /okfmem-save (alias: /primer)."
+allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent
+description: "Session close-out — clean up tool-created worktrees/branches, write active state to STATE.md, capture durable insights as memory pages, and commit + push okfmem-store via `okfmem sync`. Drafts an impl-complete comment on the resolved GitHub issue via `gh issue comment`. Invoked as /okfmem-save (alias: /primer)."
 ---
 
 # /okfmem-save — Write active state + capture insights + commit & push okfmem-store
@@ -11,7 +11,7 @@ description: "Session close-out — clean up tool-created worktrees/branches, wr
 > process. This skill and the memory engine live in the `okfmem` repo
 > (`~/okfmem/skills/`); `okfmem init` symlinks it into each harness.
 
-`/okfmem-save` closes out a work session in one move: overwrite the project's bounded active state (`STATE.md`), **capture durable insights as per-project markdown memory pages**, optionally post an impl-complete comment on the resolved issue (Linear or GitHub), and commit + push `~/okfmem-store` synchronously at the end.
+`/okfmem-save` closes out a work session in one move: overwrite the project's bounded active state (`STATE.md`), **capture durable insights as per-project markdown memory pages**, optionally post an impl-complete comment on the resolved GitHub issue, and commit + push `~/okfmem-store` synchronously at the end.
 
 **Everything is plain markdown under `~/okfmem-store` — no MCP, no daemon.** Active state and durable insights are files the native memory system auto-loads next session (`STATE.md`, `MEMORY.md`, and the `<topic>.md` pages). This skill writes them directly, in-session, on whatever model the session is on, then runs the final `git` commit/push via the shared `okfmem sync` helper.
 
@@ -126,7 +126,7 @@ okfmem pull   # or: python3 ~/okfmem/okfmem pull   if not on PATH
 
 ### Step 1c: Clean up tool-created worktrees and branches
 
-Before any memory write, reclaim the worktrees and branches that tooling left behind this session. `/implement-issue`, `/implement-epic`, `commit-all.sh`, and the worktree isolation used by Stop hooks (fallow audits and friends) all create `<repo>/.claude/worktrees/<slug>/` dirs and local feature branches (`feat/…`, `gh-<N>`, lowercase Linear IDs); after a ff-merge into `main` they are dead weight, and `git worktree remove`'s partial-success failure mode (TCC, Docker pins) leaves orphan dirs behind. The `fallow audit --changed-since` Stop hook also leaves **detached, clean temp worktrees** in `$TMPDIR` (basename `fallow-audit-base-cache-*`) — the sweep now matches those too. Run the sweep:
+Before any memory write, reclaim the worktrees and branches that tooling left behind this session. `/implement-issue`, `/implement-epic`, `commit-all.sh`, and the worktree isolation used by Stop hooks (fallow audits and friends) all create `<repo>/.claude/worktrees/<slug>/` dirs and local feature branches (`feat/…`, `gh-<N>`); after a ff-merge into `main` they are dead weight, and `git worktree remove`'s partial-success failure mode (TCC, Docker pins) leaves orphan dirs behind. The `fallow audit --changed-since` Stop hook also leaves **detached, clean temp worktrees** in `$TMPDIR` (basename `fallow-audit-base-cache-*`) — the sweep now matches those too. Run the sweep:
 
 ```bash
 bash "$PROJECT_ROOT/scripts/cleanup-worktrees.sh"   # ~/tools — adjust if PROJECT_ROOT differs
@@ -148,9 +148,9 @@ For each durable item worth preserving across sessions, pick the right home:
 | -- | -- |
 | What's in progress, next step, active blocker | **`STATE.md`** (see Step 5) — bounded active state |
 | Decision, engineering insight, reusable pattern, "lesson learned" | **Memory page** — a `<topic>.md` page + `MEMORY.md` pointer (see Step 3) |
-| Bug discovered, follow-up work not yet started | **Linear issue** — file it |
+| Bug discovered, follow-up work not yet started | **GitHub issue** — file it |
 | What shipped in this session | **`STATE.md`** (`Summary` + `Decisions` if significant) |
-| What shipped in prior sessions | **Skip** — `git log` + Linear are authoritative |
+| What shipped in prior sessions | **Skip** — `git log` + the issue tracker are authoritative |
 
 ### Step 3: Capture durable insights as memory pages
 
@@ -168,7 +168,7 @@ The test is *durability under `git log`*, not importance-at-the-time. Capture th
 
 Each page is OKF v0.1: markdown with YAML frontmatter carrying a **top-level `type:`** field (`user` | `feedback` | `project` | `reference`).
 
-- **Filename** — a short kebab-case slug, e.g. `linear-mcp-save-partial-failure.md`. Reuse the *exact* existing filename when extending a topic already captured — `Edit` (or re-`Write`) that page so it merges instead of duplicating.
+- **Filename** — a short kebab-case slug, e.g. `gh-api-save-partial-failure.md`. Reuse the *exact* existing filename when extending a topic already captured — `Edit` (or re-`Write`) that page so it merges instead of duplicating.
 - **`type`** — the frontmatter kind above.
 
 **New topic** → `Write` the page:
@@ -205,9 +205,9 @@ With the target decided, apply the ≤150-char budget check above to the pointer
 
 Do this step before Step 5 so the `STATE.md` summary can mention what was captured.
 
-### Step 4: File Linear issues for pending work
+### Step 4: File GitHub issues for pending work
 
-Follow-ups, deferred scope, discovered bugs → Linear issue. Do not list them in `STATE.md` — `STATE.md` is active state only.
+Follow-ups, deferred scope, discovered bugs → GitHub issue. Do not list them in `STATE.md` — `STATE.md` is active state only.
 
 ### Step 5: Write active state to `STATE.md`
 
@@ -257,18 +257,16 @@ Keep `## Goal` as the project's standing goal — carry forward the prior value 
 
 If code committed this session resolves an issue, post an implementation-complete comment on it. The body shape is identical regardless of backend — only the read + write surface differs.
 
-**Pick the backend the same way `/implement-issue` and `/create-issue` do** — by checking the project's `.env` for `LINEAR_TEAM` (walk up from `$PROJECT_ROOT`, same as `load_env`):
+**The tracker is GitHub Issues.** Fetch via `gh issue view <N> --repo <owner>/<repo> --json number,title,body,labels,state` for acceptance criteria; post via `gh issue comment <N> --repo <owner>/<repo> --body-file <tempfile>`; verify with `gh issue view <N> --repo <owner>/<repo> --comments`.
 
-- **`LINEAR_TEAM` set** → Linear backend. Fetch via Linear MCP `get_issue` for acceptance criteria; post via `save_comment`; verify round-trip via `get_issue`. If the issue has a GitHub attachment (`attachments`/`url` field on the Linear issue), prefer posting via `gh issue comment <N> --repo <owner>/<repo> --body-file <tempfile>` — the sync propagates to Linear and avoids the Linear MCP markdown-drop bug for richer bodies (see `~/.claude/CLAUDE.md` → "Writing Linear issue bodies"). Verify via `get_issue` either way.
-- **`LINEAR_TEAM=UNSET` AND `gh repo view` succeeds** → GitHub backend. Fetch via `gh issue view <N> --repo <owner>/<repo> --json number,title,body,labels,state` for acceptance criteria; post via `gh issue comment <N> --repo <owner>/<repo> --body-file <tempfile>`; verify with `gh issue view <N> --repo <owner>/<repo> --comments`.
-- **Neither available** → skip this step and tell the user one line: "no issue tracker detected — skipping impl-complete comment".
+- **`gh repo view` fails** → skip this step and tell the user one line: "no issue tracker detected — skipping impl-complete comment".
 
-Resolve the issue identifier in priority order: (1) the active worktree slug (`.claude/worktrees/<slug>/` — `gh-<N>` for GH, lowercase Linear ID for Linear), (2) the commit trailer (`Resolves #<N>` / `Refs #<N>`) from `git log -1`, (3) `STATE.md`'s `## Left off` / `## Summary`. If still ambiguous, ask the user.
+Resolve the issue identifier in priority order: (1) the active worktree slug (`.claude/worktrees/<slug>/` — `gh-<N>`), (2) the commit trailer (`Resolves #<N>` / `Refs #<N>`) from `git log -1`, (3) `STATE.md`'s `## Left off` / `## Summary`. If still ambiguous, ask the user.
 
 Steps:
 
 1. Commit hash: `git log --oneline -1`
-2. Fetch issue (per backend, as above) — grab acceptance criteria from the body
+2. Fetch the issue (as above) — grab acceptance criteria from the body
 3. Post the comment with this body:
 
 ```markdown
@@ -285,7 +283,7 @@ Steps:
 - **Change 2**: description
 ```
 
-Rules: check `[x]` with a short note per criterion; use `[ ]` + reason if not met; list additional changes made beyond scope; keep it factual; round-trip verify via the backend's read command (`get_issue` for Linear, `gh issue view --comments` for GitHub).
+Rules: check `[x]` with a short note per criterion; use `[ ]` + reason if not met; list additional changes made beyond scope; keep it factual; round-trip verify with `gh issue view --comments`.
 
 **Never write the body and post it in one compound bash command.** `Bash(gh:*)` is allow-listed, but a `cat > /tmp/body.md <<EOF … EOF` heredoc chained with `gh issue comment` does *not* match that prefix rule — the compound falls through to the auto-mode classifier, which gates the embedded external write and blocks the whole invocation. Worse, the tempfile write lived inside the blocked compound, so the retry fails with "no such file." Do it as two discrete steps:
 
@@ -294,9 +292,9 @@ Rules: check `[x]` with a short note per criterion; use `[ ]` + reason if not me
    ```bash
    gh issue comment <N> --repo <owner>/<repo> --body-file /tmp/<issue>-complete.md
    ```
-   Keep this on its own — no `cd …;`, no `&&`, no heredoc on the same line. (The Linear-MCP `save_comment` path is unaffected; this gotcha is GitHub-only.)
+   Keep this on its own — no `cd …;`, no `&&`, no heredoc on the same line.
 
-**Delegation:** main session decides which criteria are met and what additional changes shipped. Hand that decided mapping (criterion → "met, note: X" or "unmet, reason: Y", plus the additional-changes list) to an `Agent(model="haiku")` that formats the comment body. The Agent returns the body text; the main session writes it to the tempfile **with the Write tool** and posts via the standalone `gh issue comment` / `save_comment` call above, then verifies round-trip.
+**Delegation:** main session decides which criteria are met and what additional changes shipped. Hand that decided mapping (criterion → "met, note: X" or "unmet, reason: Y", plus the additional-changes list) to an `Agent(model="haiku")` that formats the comment body. The Agent returns the body text; the main session writes it to the tempfile **with the Write tool** and posts via the standalone `gh issue comment` call above, then verifies round-trip.
 
 ### Step 7: Commit and push `~/okfmem-store` via `okfmem sync`
 
@@ -316,7 +314,7 @@ Show the user:
 - The session summary written to `STATE.md` (one line)
 - Any insights captured as memory pages (slugs + one-line hooks; note new vs. updated-existing)
 - Any `MEMORY.md` pointer over the 150-char budget after this session's writes (slug + length), or `"none"`; likewise if the `okfmem reindex --report` spot-check flagged `STATE.md` as `OVER`
-- Any issues filed or commented on (Linear or GitHub)
+- Any issues filed or commented on
 - The memory push result — the commit SHA that was pushed (from `okfmem sync`'s status line), or `"no memory changes to push"` if the working tree was clean.
 
 ## Rules
@@ -328,7 +326,7 @@ Show the user:
 - **An index pointer is ≤150 chars, checked at write time (#52)** — new or refreshed, tighten before writing; if it can't be tightened without losing recall value, write it and report it in Step 8 rather than pass silently
 - **`STATE.md` has an 8192-byte ceiling** (`memory_reindex.STATE_BUDGET_BYTES`), spot-checked via `okfmem reindex --report` after Step 5's write; report `OVER`, don't gate on it
 - **Reuse an existing page slug to update a topic** (dedup) — rewrite the page to current truth instead of leaving stale duplicates
-- **Pending work goes in the issue tracker** (Linear or GitHub, whichever this project uses), not in `STATE.md` `## Blockers` (reserve blockers for "can't progress" not "haven't started")
+- **Pending work goes in the issue tracker** (GitHub Issues), not in `STATE.md` `## Blockers` (reserve blockers for "can't progress" not "haven't started")
 - **Capture memory pages BEFORE writing `STATE.md`** so the session summary can reference what was captured
 - **Skip reconstructable content** — `git log` + the issue tracker are authoritative for history; don't capture "what shipped"
 - **Commit + push `~/okfmem-store` via `okfmem sync`** (Step 7), synchronously, no-op when clean — no daemon, cross-platform; the same helper backs the Stop-hook consolidation job
